@@ -36,20 +36,20 @@ New Relic does not display raw OpenTelemetry data directly in the APM UI. Instea
 
 ## Quick reference: What does each UI section need?
 
-| UI Section                                | Powered by                                 | Required OTel source                              |
-| ----------------------------------------- | ------------------------------------------ | ------------------------------------------------- |
-| **Summary**                               | `apm.service.transaction.duration`         | HTTP or RPC server metrics (see below)            |
-| **Transactions**                          | `apm.service.transaction.duration`         | HTTP or RPC server metrics                        |
-| **Transaction segment breakdown**         | `apm.service.transaction.overview`         | Spans only — server + nested client spans         |
-| **Databases**                             | `apm.service.datastore.operation.duration` | DB metrics (v1.33+) or DB client spans (fallback) |
-| **DB "Time consumption by caller"**       | `apm.service.transaction.overview`         | Spans only                                        |
-| **External Services**                     | `apm.service.external.host.duration`       | HTTP/RPC client metrics                           |
-| **External "Time consumption by caller"** | `apm.service.transaction.overview`         | Spans only                                        |
-| **Distributed Tracing**                   | —                                          | Spans                                             |
-| **Errors Inbox**                          | —                                          | Spans with `otel.status_code = ERROR`             |
-| **Logs**                                  | —                                          | Logs                                              |
-| **JVM Runtime**                           | —                                          | JVM runtime metrics (OTel Java agent)             |
-| **Go Runtime**                            | —                                          | Go runtime metrics (OTel Go contrib)              |
+| UI Section                                | Powered by                                                                          | Required OTel source                              |
+| ----------------------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------- |
+| **Summary**                               | [`apm.service.transaction.duration`](#apmservicetransactionduration)                | HTTP or RPC server metrics (see below)            |
+| **Transactions**                          | [`apm.service.transaction.duration`](#apmservicetransactionduration)                | HTTP or RPC server metrics                        |
+| **Transaction segment breakdown**         | [`apm.service.transaction.overview`](#apmservicetransactionoverview)                | Spans only — server + nested client spans         |
+| **Databases**                             | [`apm.service.datastore.operation.duration`](#apmservicedatastoreoperationduration) | DB metrics (v1.33+) or DB client spans (fallback) |
+| **DB "Time consumption by caller"**       | [`apm.service.transaction.overview`](#apmservicetransactionoverview)                | Spans only                                        |
+| **External Services**                     | [`apm.service.external.host.duration`](#apmserviceexternalhostduration)             | HTTP/RPC client metrics                           |
+| **External "Time consumption by caller"** | [`apm.service.transaction.overview`](#apmservicetransactionoverview)                | Spans only                                        |
+| **Distributed Tracing**                   | —                                                                                   | Spans                                             |
+| **Errors Inbox**                          | —                                                                                   | Spans with `otel.status_code = ERROR`             |
+| **Logs**                                  | —                                                                                   | Logs                                              |
+| **JVM Runtime**                           | —                                                                                   | JVM runtime metrics (OTel Java agent)             |
+| **Go Runtime**                            | —                                                                                   | Go runtime metrics (OTel Go contrib)              |
 
 ---
 
@@ -59,7 +59,7 @@ New Relic does not display raw OpenTelemetry data directly in the APM UI. Instea
 
 **Powers:** Summary page, Transactions page, error rate
 
-Synthesized from your **server-side HTTP or RPC metrics**.
+Synthesized from one of these **server-side HTTP or RPC metrics**.
 
 | Source OTel metric                                                                                                              | Required              | Source attributes → derived metric fields                                                                                                                                                                                                                        |
 | ------------------------------------------------------------------------------------------------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -139,7 +139,9 @@ These contribute segment time to their parent transaction.
 
 **Powers:** External Services page
 
-Synthesized from your **outbound HTTP or RPC client metrics**.
+Synthesized from one of these **outbound HTTP or RPC client metrics**.
+
+- **DOES OUTBOUND MEAN IT'S LOOKING FOR `client`?**
 
 | Source OTel metric                                                                                                              | Required              | Source attributes → derived metric fields                                                          |
 | ------------------------------------------------------------------------------------------------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------- |
@@ -157,6 +159,7 @@ New Relic uses the presence of `db.system` vs `db.system.name` on a span to dete
 
 - **`db.system` present** → [old convention (v1.24)](https://github.com/open-telemetry/semantic-conventions/blob/v1.24.0/docs/database/database-spans.md); no metric data is expected, so New Relic derives this metric directly from the **span**.
 - **`db.system.name` present** → [new stable convention (v1.33)](https://github.com/open-telemetry/semantic-conventions/blob/v1.33.0/docs/database/database-metrics.md); New Relic uses the `db.client.operation.duration` **metric**.
+  - **FACT CHECK THIS, WE MIGHT JUST LOOK FOR THE LACK OF `db.system`**
 
 | Convention                                                                                                                                                           | OTel source                                                       | Required              | Source attributes → derived metric fields                                                                                                                                                                                                                                                  |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
