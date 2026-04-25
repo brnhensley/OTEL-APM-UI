@@ -4,6 +4,19 @@
 
 New Relic does not display raw OpenTelemetry data directly in the APM UI. Instead, it **synthesizes a set of `apm.service.*` metrics** from OTel data, then uses those to drive the UI — the same way the New Relic language agents do. The original OTel data is still available for custom queries.
 
+## Contents
+
+- [How it works](#how-it-works-the-short-version)
+- [Quick reference](#quick-reference-what-does-each-ui-section-need)
+- [Metric-by-metric breakdown](#metric-by-metric-breakdown)
+  - [`apm.service.transaction.duration`](#apmservicetransactionduration)
+  - [`apm.service.transaction.overview`](#apmservicetransactionoverview)
+  - [`apm.service.external.host.duration`](#apmserviceexternalhostduration)
+  - [`apm.service.datastore.operation.duration`](#apmservicedatastoreoperationduration)
+- [Special cases](#special-cases)
+- [What you need to instrument](#what-you-need-to-instrument-in-plain-terms)
+- [Troubleshooting Flowcharts](#troubleshooting)
+
 ---
 
 ## How it works (the short version)
