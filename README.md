@@ -14,7 +14,7 @@ New Relic does not display raw OpenTelemetry data directly in the APM UI. Instea
   - [`apm.service.external.host.duration`](#apmserviceexternalhostduration)
   - [`apm.service.datastore.operation.duration`](#apmservicedatastoreoperationduration)
 - [Special cases](#special-cases)
-- [What you need to instrument](#what-you-need-to-instrument-in-plain-terms)
+- [What data do they need to send in plain terms?](#what-data-do-they-need-to-send-in-plain-terms)
 - [Troubleshooting Flowcharts](#troubleshooting)
 
 ---
@@ -201,19 +201,41 @@ traffic volume. A 10% sample rate means throughput appears ~10x lower than reali
 
 ---
 
-## What you need to instrument, in plain terms
+## What data do they need to send in plain terms?
 
 **Summary + Transactions pages:**
-Emit either `http.server.request.duration` with `http.request.method` and `http.route`, _or_ `rpc.server.duration` with `rpc.system`, `rpc.service`, and `rpc.method`.
+Emit either:
+
+- `http.server.request.duration` with `http.request.method` and `http.route`
+- `rpc.server.duration` with `rpc.system`, `rpc.service`, and `rpc.method`.
 
 **Databases page:**
-Emit `db.client.operation.duration` (v1.33) with `db.system.name`. If your DB instrumentation library doesn't yet emit `db.client.operation.duration`, DB client spans with `db.system` are used as a fallback.
+Emit either
+
+- `db.client.operation.duration` metrics (v1.33) with `db.system.name`.
+- DB client spans with `db.system` are used as a fallback.
 
 **External Services page:**
-Emit either `http.client.request.duration` with `http.request.method` and `server.address`, _or_ `rpc.client.duration` with `rpc.system` and `net.peer.name`.
+Emit either:
+
+- `http.client.request.duration` with `http.request.method` and `server.address`
+- `rpc.client.duration` with `rpc.system` and `net.peer.name`.
 
 **Segment breakdowns (inside a transaction):**
-Ensure spans are emitted with `span.kind = server` on inbound request spans and `span.kind = client` on outbound DB/HTTP/RPC spans, with the relevant semantic convention attributes listed in the `apm.service.transaction.overview` tables above. Segment breakdowns always come from spans.
+Ensure spans are emitted with `span.kind = server` on inbound request spans and `span.kind = client` on outbound DB/HTTP/RPC spans, with the relevant semantic convention attributes listed in the [`apm.service.transaction.overview`](#apmservicetransactionoverview) tables above. Segment breakdowns always come from spans.
+
+**Error rate:**
+Your server metric must include an error attribute:
+
+- `http.server.request.duration` with `error.type` on error requests
+- `http.server.duration` with `http.status_code` (>= 500 counts as an error)
+- `rpc.server.duration` with `rpc.grpc.status_code` (codes 2, 4, 12, 13, 14, 15 count as errors)
+
+**Distributed Tracing:**
+Emit spans with `service.name`.
+
+**Errors Inbox:**
+Emit spans with `otel.status_code = ERROR`
 
 ---
 
