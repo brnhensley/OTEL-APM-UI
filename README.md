@@ -15,7 +15,8 @@ New Relic does not display raw OpenTelemetry data directly in the APM UI. Instea
   - [`apm.service.datastore.operation.duration`](#apmservicedatastoreoperationduration)
 - [Special cases](#special-cases)
 - [What data is needed](#what-data-is-needed)
-- [Troubleshooting Flowcharts](#troubleshooting)
+- [.NET VMs page](#net-vms-page)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -63,6 +64,7 @@ New Relic does not display raw OpenTelemetry data directly in the APM UI. Instea
 | **Logs**                                  | —                                                                                   | Logs                                                 |
 | **JVM Runtime**                           | —                                                                                   | JVM runtime metrics (OTel Java agent)                |
 | **Go Runtime**                            | —                                                                                   | Go runtime metrics (OTel Go contrib)                 |
+| **.NET VMs**                              | —                                                                                   | `process.runtime.dotnet.*` metrics — pre-stable SDK only (see [.NET VMs page](#net-vms-page)) |
 
 ---
 
@@ -253,6 +255,112 @@ Emit spans with `service.name`.
 **Errors Inbox:**
 Emit spans with `otel.status_code = ERROR`.
 
+**.NET VMs page:**
+Use `OpenTelemetry.Instrumentation.Runtime` **< 1.0.0** and ensure metrics are exported with `service.name` and `service.instance.id`. The UI does not yet support the stable `dotnet.*` metric names introduced in v1.0.0 — see [.NET VMs page](#net-vms-page) for the full breakdown.
+
+---
+
+## .NET VMs page
+
+**Nerdlet:** `apm-agents.dotnet-vm`
+
+The .NET VMs page shows runtime health metrics for .NET services: GC heap and collection stats per generation, thread pool activity, CLR internals (assemblies, exceptions, lock contention, timers), and JIT compilation metrics. For OTel services, every chart on this page is powered by the `process.runtime.dotnet.*` metric family.
+
+> **SDK version caveat — the most common reason this page is blank for OTel services**
+>
+> The UI queries `process.runtime.dotnet.*` metric names, which are the **pre-stable** names used by `OpenTelemetry.Instrumentation.Runtime` versions **before v1.0.0**. Starting in v1.0.0, the library was stabilized and the metric names changed to `dotnet.*` (e.g. `dotnet.gc.collections`, `dotnet.thread_pool.thread.count`). The attribute that filters GC charts by heap generation also changed from `generation` to `gc.heap.generation`.
+>
+> **If your customer is on `OpenTelemetry.Instrumentation.Runtime` ≥ 1.0.0, the .NET VMs page will be blank** because the UI still queries the old names. There is no supported workaround — this is an open bug. The diagnostic queries below can confirm which convention is being emitted.
+
+All OTel queries on this page facet by `service.instance.id` (one series per running instance). NR agent queries facet by `host` / `host.displayName` / `instanceName`.
+
+---
+
+### GC charts
+
+These charts track .NET garbage collector activity. All OTel queries use the `generation` attribute (values: `'0'`, `'1'`, `'2'`, `'poh'`) to filter by heap generation. In the stable SDK this attribute was renamed `gc.heap.generation`, so customers on ≥ v1.0.0 will see empty filters even if the metric arrives under the old name.
+
+| Chart title | OTel source metric | Filter attribute | Aggregation | Notes |
+|---|---|---|---|---|
+| GC Collections | `process.runtime.dotnet.gc.collections.count` | `generation = '0'/'1'/'2'` | `sum()` | One series per generation per call |
+| GC Objects Size | `process.runtime.dotnet.gc.objects.size` | — | `latest()` | Total live object bytes on the managed heap |
+| GC Allocations Size | `process.runtime.dotnet.gc.allocations.size` | — | `sum()` | Cumulative bytes allocated since process start |
+| GC Committed Memory | `process.runtime.dotnet.gc.committed_memory.size` | — | `latest()` | Bytes committed to OS by the GC |
+| GC Generation Fragmentation | `process.runtime.dotnet.gc.heap.fragmentation.size` | `generation = '0'/'1'/'2'` | `latest()` | Free space within each generation's heap segment |
+| GC Generation 0 heap metrics | `process.runtime.dotnet.gc.heap.size` + `process.runtime.dotnet.gc.heap.fragmentation.size` | `generation = '0'` | `latest()` | Size + fragmentation for Gen 0 |
+| GC Generation 0 heap collection metrics | `process.runtime.dotnet.gc.collections.count` | `generation = '0'` | `sum()` | Collection count for Gen 0 |
+| GC Generation 1 heap metrics | `process.runtime.dotnet.gc.heap.size` + `process.runtime.dotnet.gc.heap.fragmentation.size` | `generation = '1'` | `latest()` | Size + fragmentation for Gen 1 |
+| GC Generation 1 heap collection metrics | `process.runtime.dotnet.gc.collections.count` | `generation = '1'` | `sum()` | Collection count for Gen 1 |
+| GC Generation 2 heap metrics | `process.runtime.dotnet.gc.heap.size` + `process.runtime.dotnet.gc.heap.fragmentation.size` | `generation = '2'` | `latest()` | Size + fragmentation for Gen 2 |
+| GC Generation 2 heap collection metrics | `process.runtime.dotnet.gc.collections.count` | `generation = '2'` | `sum()` | Collection count for Gen 2 |
+| GC POH Heap Size | `process.runtime.dotnet.gc.heap.size` + `process.runtime.dotnet.gc.heap.fragmentation.size` | `generation = 'poh'` | `latest()` | Pinned Object Heap — .NET 5+ only |
+
+> **Charts with no OTel equivalent (NR agent only):** GC Handles/Induced, GC Large Object Heap size/survived, Percent time in GC. These panels are simply absent for OTel services.
+
+---
+
+### Thread pool charts
+
+| Chart title | OTel source metric | Aggregation | Notes |
+|---|---|---|---|
+| Threadpool Active Threads | `process.runtime.dotnet.thread_pool.threads.count` | `latest()` | Current thread count in the pool |
+| Threadpool Completion Rate | `process.runtime.dotnet.thread_pool.completed_items.count` | `rate(sum(), 1 minute)` | Work items completed per minute |
+| Threadpool Queue Depth | `process.runtime.dotnet.thread_pool.queue.length` | `latest()` | Work items waiting in the queue |
+
+> **Charts with no OTel equivalent (NR agent only):** Thread completion available/in-use, thread worker available/in-use, thread throughput requested/started/queue-length. These use `newrelic.timeslice.value` with `Threadpool/*` metricTimesliceNames and are not emitted by the OTel SDK.
+
+---
+
+### CLR / runtime charts
+
+| Chart title | OTel source metric | Aggregation | Notes |
+|---|---|---|---|
+| Assemblies Count | `process.runtime.dotnet.assemblies.count` | `latest()` | Number of assemblies loaded in the current app domain |
+| Exception Count | `process.runtime.dotnet.exceptions.count` | `sum()` | Total exceptions thrown since process start |
+| Monitor Lock Contention Count | `process.runtime.dotnet.monitor.lock_contention.count` | `sum()` | `Monitor.Enter` / `lock` contentions — a proxy for lock pressure |
+| Timer Count | `process.runtime.dotnet.timer.count` | `latest()` | Active `System.Threading.Timer` instances |
+| JIT Advanced Metrics | `process.runtime.dotnet.jit.compilation_time` (ms)<br>`process.runtime.dotnet.jit.il_compiled.size` (bytes)<br>`process.runtime.dotnet.jit.methods_compiled.count` | `sum()` | JIT activity; mostly relevant during startup or with Tiered Compilation |
+
+---
+
+### What the UI does NOT show for OTel .NET services
+
+The following panels exist on the page for NR agent services but have **no OTel query defined** and will not render for OTel services regardless of SDK version:
+
+- CPU utilization (`apm.service.cpu.usertime.utilization`) and CPU user time (`CPU/User Time`)
+- Physical memory and Working Set (`Memory/Physical`, `Memory/WorkingSet`)
+- Percent time in GC (`GC/PercentTimeInGC`)
+- GC Handles and GC Induced (`GC/Handles`, `GC/Induced`)
+- GC Large Object Heap size/survived
+- Thread completion available/in-use, thread worker available/in-use, thread throughput
+
+---
+
+### Stable SDK metric name mapping
+
+If a customer is on `OpenTelemetry.Instrumentation.Runtime` ≥ 1.0.0, their metrics arrive under the stable `dotnet.*` names. The UI does not query these yet. The table below maps old → new for reference and for writing workaround queries:
+
+| Pre-stable metric (UI queries this) | Stable metric (≥ v1.0.0, UI does NOT query this) | Attribute change |
+|---|---|---|
+| `process.runtime.dotnet.gc.collections.count` | `dotnet.gc.collections` | `generation` → `gc.heap.generation` |
+| `process.runtime.dotnet.gc.objects.size` | `dotnet.gc.heap.total_allocated` | — |
+| `process.runtime.dotnet.gc.allocations.size` | `dotnet.gc.heap.total_allocated` | — |
+| `process.runtime.dotnet.gc.committed_memory.size` | `dotnet.gc.last_collection.memory.committed_size` | — |
+| `process.runtime.dotnet.gc.heap.size` | `dotnet.gc.last_collection.heap.size` | `generation` → `gc.heap.generation` |
+| `process.runtime.dotnet.gc.heap.fragmentation.size` | `dotnet.gc.last_collection.heap.fragmentation.size` | `generation` → `gc.heap.generation` |
+| `process.runtime.dotnet.thread_pool.threads.count` | `dotnet.thread_pool.thread.count` | — |
+| `process.runtime.dotnet.thread_pool.completed_items.count` | `dotnet.thread_pool.work_item.count` | — |
+| `process.runtime.dotnet.thread_pool.queue.length` | `dotnet.thread_pool.queue.length` | — |
+| `process.runtime.dotnet.assemblies.count` | `dotnet.assembly.count` | — |
+| `process.runtime.dotnet.exceptions.count` | `dotnet.exceptions` | `exception.type` added |
+| `process.runtime.dotnet.monitor.lock_contention.count` | `dotnet.monitor.lock_contentions` | — |
+| `process.runtime.dotnet.timer.count` | `dotnet.timer.count` | — |
+| `process.runtime.dotnet.jit.compilation_time` | `dotnet.jit.compilation_time` | — |
+| `process.runtime.dotnet.jit.il_compiled.size` | `dotnet.jit.compiled_il.size` | — |
+| `process.runtime.dotnet.jit.methods_compiled.count` | `dotnet.jit.compiled_methods` | — |
+
+---
+
 ---
 
 ## Troubleshooting
@@ -281,8 +389,8 @@ Emit spans with `otel.status_code = ERROR`.
 -- (1) Check raw OTel data is arriving (metrics and spans)
 FROM Metric, Span SELECT count(*) WHERE service.name = 'SERVICE_NAME' SINCE 1 day ago
 
--- (2) Check whether apm.service.* metrics have been synthesized at all
-FROM Metric SELECT count(*) WHERE metricName LIKE 'apm.service.%' AND service.name = 'SERVICE_NAME' FACET metricName SINCE 1 day ago
+-- (2) Check which apm.service.* metrics have been synthesized
+FROM Metric SELECT uniques(metricName) WHERE metricName LIKE 'apm.service.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 ```
 
 ---
@@ -329,16 +437,16 @@ FROM Metric SELECT count(*) WHERE metricName LIKE 'apm.service.%' AND service.na
 
 ```sql
 -- (1) Check which server metrics are arriving
-FROM Metric SELECT count(*) WHERE metricName IN ('http.server.request.duration', 'http.server.duration', 'rpc.server.call.duration', 'rpc.server.duration') AND service.name = 'SERVICE_NAME' FACET metricName SINCE 1 day ago
+FROM Metric SELECT uniques(metricName) WHERE metricName IN ('http.server.request.duration', 'http.server.duration', 'rpc.server.call.duration', 'rpc.server.duration') AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
 -- (2) Check required attributes are present on each metric
-FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' AND service.name = 'SERVICE_NAME' FACET http.request.method SINCE 1 day ago
+FROM Metric SELECT uniques(http.request.method) WHERE metricName = 'http.server.request.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
 -- (3) Check http.route is present (missing values here = "unknown" transaction names)
-FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' AND service.name = 'SERVICE_NAME' FACET http.route SINCE 1 day ago
+FROM Metric SELECT uniques(http.route) WHERE metricName = 'http.server.request.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
 -- (4) Verify synthesized apm.service.transaction.duration exists and see transaction names
-FROM Metric SELECT count(*) WHERE metricName = 'apm.service.transaction.duration' AND service.name = 'SERVICE_NAME' FACET transactionName SINCE 1 day ago
+FROM Metric SELECT uniques(transactionName) WHERE metricName = 'apm.service.transaction.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 ```
 
 ---
@@ -399,11 +507,17 @@ FROM Metric SELECT count(*) WHERE metricName = 'db.client.operation.duration' AN
 -- (3b) Check for v1.24 legacy DB spans (db.system present, no db.system.name)
 FROM Span SELECT count(*) WHERE db.system IS NOT NULL AND db.system.name IS NULL AND service.name = 'SERVICE_NAME' FACET db.system SINCE 1 day ago
 
--- (4) Check for unknown operations or tables on db.client.operation.duration (v1.33)
-FROM Metric SELECT count(*) WHERE metricName = 'db.client.operation.duration' AND service.name = 'SERVICE_NAME' FACET db.operation.name, db.query.summary SINCE 1 day ago
+-- (4a) Check for unknown operation names on db.client.operation.duration (v1.33)
+FROM Metric SELECT uniques(db.operation.name) WHERE metricName = 'db.client.operation.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
--- (5) Verify synthesized apm.service.datastore.operation.duration exists
-FROM Metric SELECT count(*) WHERE metricName = 'apm.service.datastore.operation.duration' AND service.name = 'SERVICE_NAME' FACET db.system, db.operation SINCE 1 day ago
+-- (4b) Check for unknown query summaries on db.client.operation.duration (v1.33)
+FROM Metric SELECT uniques(db.query.summary) WHERE metricName = 'db.client.operation.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+
+-- (5a) Verify synthesized apm.service.datastore.operation.duration exists; inspect db.system values
+FROM Metric SELECT uniques(db.system) WHERE metricName = 'apm.service.datastore.operation.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+
+-- (5b) Inspect db.operation values on apm.service.datastore.operation.duration
+FROM Metric SELECT uniques(db.operation) WHERE metricName = 'apm.service.datastore.operation.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 ```
 
 ---
@@ -446,25 +560,28 @@ FROM Metric SELECT count(*) WHERE metricName = 'apm.service.datastore.operation.
 
 ```sql
 -- (1) Check which client metrics are arriving
-FROM Metric SELECT count(*) WHERE metricName IN ('http.client.request.duration', 'http.client.duration', 'rpc.client.call.duration', 'rpc.client.duration') AND service.name = 'SERVICE_NAME' FACET metricName SINCE 1 day ago
+FROM Metric SELECT uniques(metricName) WHERE metricName IN ('http.client.request.duration', 'http.client.duration', 'rpc.client.call.duration', 'rpc.client.duration') AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
 -- (2) Check required attributes are present on each metric
-FROM Metric SELECT count(*) WHERE metricName = 'http.client.request.duration' AND service.name = 'SERVICE_NAME' FACET http.request.method SINCE 1 day ago
+FROM Metric SELECT uniques(http.request.method) WHERE metricName = 'http.client.request.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
 -- (3a) Check server.address on http.client.request.duration (missing = "unknown" hosts)
-FROM Metric SELECT count(*) WHERE metricName = 'http.client.request.duration' AND service.name = 'SERVICE_NAME' FACET server.address SINCE 1 day ago
+FROM Metric SELECT uniques(server.address) WHERE metricName = 'http.client.request.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
 -- (3b) Check net.peer.name on http.client.duration (missing = "unknown" hosts for v1.20 HTTP)
-FROM Metric SELECT count(*) WHERE metricName = 'http.client.duration' AND service.name = 'SERVICE_NAME' FACET net.peer.name SINCE 1 day ago
+FROM Metric SELECT uniques(net.peer.name) WHERE metricName = 'http.client.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
 -- (3c) Check server.address on rpc.client.call.duration (missing = "unknown" hosts for v1.40 RPC)
-FROM Metric SELECT count(*) WHERE metricName = 'rpc.client.call.duration' AND service.name = 'SERVICE_NAME' FACET server.address SINCE 1 day ago
+FROM Metric SELECT uniques(server.address) WHERE metricName = 'rpc.client.call.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
--- (3d) Check net.peer.name on rpc.client.duration (missing = "unknown" hosts for v1.20 RPC; server.address is also tried)
-FROM Metric SELECT count(*) WHERE metricName = 'rpc.client.duration' AND service.name = 'SERVICE_NAME' FACET net.peer.name, server.address SINCE 1 day ago
+-- (3d) Check net.peer.name on rpc.client.duration (missing = "unknown" hosts for v1.20 RPC)
+FROM Metric SELECT uniques(net.peer.name) WHERE metricName = 'rpc.client.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
--- (4) Verify synthesized apm.service.external.host.duration exists
-FROM Metric SELECT count(*) WHERE metricName = 'apm.service.external.host.duration' AND service.name = 'SERVICE_NAME' FACET external.host SINCE 1 day ago
+-- (3e) Check server.address on rpc.client.duration (fallback host attribute for v1.20 RPC)
+FROM Metric SELECT uniques(server.address) WHERE metricName = 'rpc.client.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+
+-- (4) Verify synthesized apm.service.external.host.duration exists and inspect host values
+FROM Metric SELECT uniques(external.host) WHERE metricName = 'apm.service.external.host.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 ```
 
 ---
@@ -542,20 +659,71 @@ Errors Inbox is empty:
 
 ```sql
 -- (1a) Check error.type is present on http.server.request.duration
-FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' AND service.name = 'SERVICE_NAME' FACET error.type SINCE 1 day ago
+FROM Metric SELECT uniques(error.type) WHERE metricName = 'http.server.request.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
 -- (1b) Check http.status_code on http.server.duration (errors counted when >= 500)
-FROM Metric SELECT count(*) WHERE metricName = 'http.server.duration' AND service.name = 'SERVICE_NAME' FACET http.status_code SINCE 1 day ago
+FROM Metric SELECT uniques(http.status_code) WHERE metricName = 'http.server.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
 -- (1c) Check error.type on rpc.server.call.duration (v1.40)
-FROM Metric SELECT count(*) WHERE metricName = 'rpc.server.call.duration' AND service.name = 'SERVICE_NAME' FACET error.type SINCE 1 day ago
+FROM Metric SELECT uniques(error.type) WHERE metricName = 'rpc.server.call.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
 -- (1d) Check rpc.grpc.status_code on rpc.server.duration (errors counted when in [2,4,12,13,14,15])
-FROM Metric SELECT count(*) WHERE metricName = 'rpc.server.duration' AND service.name = 'SERVICE_NAME' FACET rpc.grpc.status_code SINCE 1 day ago
+FROM Metric SELECT uniques(rpc.grpc.status_code) WHERE metricName = 'rpc.server.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
--- (2) Verify synthesized apm.service.error.count exists
-FROM Metric SELECT count(*) WHERE metricName = 'apm.service.error.count' AND service.name = 'SERVICE_NAME' FACET transactionName SINCE 1 day ago
+-- (2) Verify synthesized apm.service.error.count exists and inspect transaction names
+FROM Metric SELECT uniques(transactionName) WHERE metricName = 'apm.service.error.count' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
 -- (3) Check error spans are being emitted with otel.status_code = ERROR
 FROM Span SELECT count(*) WHERE otel.status_code = 'ERROR' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+```
+
+---
+
+### .NET VMs page is blank
+
+```
+(1) Is any process.runtime.dotnet.* data arriving?
+            │
+     NO ────┴──► Check SDK version.
+            │    If OpenTelemetry.Instrumentation.Runtime >= 1.0.0, the SDK emits
+            │    dotnet.* names instead — the UI does not support these yet (known bug).
+            │    Confirm with queries (1a) and (1b) below.
+            │    Downgrade to < 1.0.0 as a temporary workaround.
+        YES │
+            ▼
+(2) Are only some charts blank (e.g. GC charts blank but thread pool populated)?
+            │
+        YES ─┴──► The metric is arriving but a generation attribute filter is mismatched.
+            │    GC charts filter WHERE generation = '0'/'1'/'2'. On the stable SDK
+            │    (>= v1.0.0) this attribute is gc.heap.generation — the filter never matches.
+            │    Confirm with query (3) below.
+        NO  │
+            ▼
+(3) Is service.instance.id present on the metrics?
+            │
+     NO ────┴──► Charts render but show no series. Add service.instance.id to the
+            │    resource attributes of the OTel SDK configuration.
+            │    Confirm with query (4) below.
+        YES │
+            ▼
+  .NET VMs page should be populated. ✓
+```
+
+**Verification queries:**
+
+```sql
+-- (1a) Check if pre-stable metrics are arriving (UI supports these)
+FROM Metric SELECT uniques(metricName) WHERE metricName LIKE 'process.runtime.dotnet.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+
+-- (1b) Check if stable metrics are arriving (customer on >= v1.0.0, UI does NOT support these)
+FROM Metric SELECT uniques(metricName) WHERE metricName LIKE 'dotnet.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+
+-- (3a) Check generation attribute on GC metrics (pre-stable SDK emits 'generation')
+FROM Metric SELECT uniques(generation) WHERE metricName = 'process.runtime.dotnet.gc.collections.count' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+
+-- (3b) Check gc.heap.generation attribute on GC metrics (stable SDK >= v1.0.0 emits this instead)
+FROM Metric SELECT uniques(`gc.heap.generation`) WHERE metricName = 'process.runtime.dotnet.gc.collections.count' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+
+-- (4) Confirm service.instance.id is present (required facet for all .NET VMs OTel charts)
+FROM Metric SELECT uniques(service.instance.id) WHERE metricName LIKE 'process.runtime.dotnet.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 ```
