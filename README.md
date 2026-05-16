@@ -440,7 +440,8 @@ FROM Metric SELECT uniques(metricName) WHERE metricName LIKE 'apm.service.%' AND
 FROM Metric SELECT uniques(metricName) WHERE metricName IN ('http.server.request.duration', 'http.server.duration', 'rpc.server.call.duration', 'rpc.server.duration') AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
 -- (2) Check required attributes are present on each metric
-FROM Metric SELECT uniques(http.request.method) WHERE metricName = 'http.server.request.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' AND service.name = 'SERVICE_NAME' AND http.request.method IS NOT NULL SINCE 1 day ago
+-- zero = attribute missing; non-zero = present
 
 -- (3) Check http.route is present (missing values here = "unknown" transaction names)
 FROM Metric SELECT uniques(http.route) WHERE metricName = 'http.server.request.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
@@ -507,16 +508,12 @@ FROM Metric SELECT count(*) WHERE metricName = 'db.client.operation.duration' AN
 -- (3b) Check for v1.24 legacy DB spans (db.system present, no db.system.name)
 FROM Span SELECT count(*) WHERE db.system IS NOT NULL AND db.system.name IS NULL AND service.name = 'SERVICE_NAME' FACET db.system SINCE 1 day ago
 
--- (4a) Check for unknown operation names on db.client.operation.duration (v1.33)
+-- (4) Check for unknown operations or tables on db.client.operation.duration (v1.33)
 FROM Metric SELECT uniques(db.operation.name) WHERE metricName = 'db.client.operation.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
-
--- (4b) Check for unknown query summaries on db.client.operation.duration (v1.33)
 FROM Metric SELECT uniques(db.query.summary) WHERE metricName = 'db.client.operation.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
--- (5a) Verify synthesized apm.service.datastore.operation.duration exists; inspect db.system values
+-- (5) Verify synthesized apm.service.datastore.operation.duration exists and inspect values
 FROM Metric SELECT uniques(db.system) WHERE metricName = 'apm.service.datastore.operation.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
-
--- (5b) Inspect db.operation values on apm.service.datastore.operation.duration
 FROM Metric SELECT uniques(db.operation) WHERE metricName = 'apm.service.datastore.operation.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 ```
 
@@ -563,7 +560,8 @@ FROM Metric SELECT uniques(db.operation) WHERE metricName = 'apm.service.datasto
 FROM Metric SELECT uniques(metricName) WHERE metricName IN ('http.client.request.duration', 'http.client.duration', 'rpc.client.call.duration', 'rpc.client.duration') AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
 -- (2) Check required attributes are present on each metric
-FROM Metric SELECT uniques(http.request.method) WHERE metricName = 'http.client.request.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+FROM Metric SELECT count(*) WHERE metricName = 'http.client.request.duration' AND service.name = 'SERVICE_NAME' AND http.request.method IS NOT NULL SINCE 1 day ago
+-- zero = attribute missing; non-zero = present
 
 -- (3a) Check server.address on http.client.request.duration (missing = "unknown" hosts)
 FROM Metric SELECT uniques(server.address) WHERE metricName = 'http.client.request.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
@@ -631,7 +629,8 @@ FROM Span SELECT count(*) WHERE service.name = 'SERVICE_NAME' SINCE 1 day ago
 FROM Span SELECT count(*) WHERE service.name = 'SERVICE_NAME' FACET span.kind SINCE 1 day ago
 
 -- (3) Check that client spans have a parent span (confirms context propagation is working)
-FROM Span SELECT count(*) WHERE span.kind = 'client' AND service.name = 'SERVICE_NAME' FACET parentId IS NOT NULL SINCE 1 day ago
+FROM Span SELECT count(*) WHERE span.kind = 'client' AND parentId IS NOT NULL AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+-- non-zero = client spans have a parent span (context propagation working)
 ```
 
 ---
@@ -696,7 +695,7 @@ FROM Span SELECT count(*) WHERE otel.status_code = 'ERROR' AND service.name = 'S
         YES ─┴──► The metric is arriving but a generation attribute filter is mismatched.
             │    GC charts filter WHERE generation = '0'/'1'/'2'. On the stable SDK
             │    (>= v1.0.0) this attribute is gc.heap.generation — the filter never matches.
-            │    Confirm with query (3) below.
+            │    Confirm with queries (3a) and (3b) below.
         NO  │
             ▼
 (3) Is service.instance.id present on the metrics?
