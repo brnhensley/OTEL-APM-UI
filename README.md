@@ -15,6 +15,7 @@ New Relic does not display raw OpenTelemetry data directly in the APM UI. Instea
   - [`apm.service.datastore.operation.duration`](#apmservicedatastoreoperationduration)
 - [Special cases](#special-cases)
 - [What data is needed](#what-data-is-needed)
+- [JVM Runtime page](#jvm-runtime-page)
 - [.NET VMs page](#net-vms-page)
 - [Troubleshooting](#troubleshooting)
 
@@ -62,7 +63,7 @@ New Relic does not display raw OpenTelemetry data directly in the APM UI. Instea
 | **Distributed Tracing**                   | —                                                                                   | Spans                                                |
 | **Errors Inbox**                          | —                                                                                   | Spans with `otel.status_code = ERROR`                |
 | **Logs**                                  | —                                                                                   | Logs                                                 |
-| **JVM Runtime**                           | —                                                                                   | JVM runtime metrics (OTel Java agent)                |
+| **JVM Runtime**                           | —                                                                                   | `process.runtime.jvm.*` metrics ([otel-spec v1.17](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.17.0/specification/metrics/semantic_conventions/runtime-environment-metrics.md), pre-stable) + `jvm.cpu.recent_utilization` ([semconv v1.26](https://github.com/open-telemetry/semantic-conventions/blob/v1.26.0/docs/runtime/jvm-metrics.md), stable) — see [JVM Runtime page](#jvm-runtime-page) |
 | **Go Runtime**                            | —                                                                                   | Go runtime metrics (OTel Go contrib)                 |
 | **.NET VMs**                              | —                                                                                   | `process.runtime.dotnet.*` metrics — pre-stable SDK only (see [.NET VMs page](#net-vms-page)) |
 
@@ -255,8 +256,95 @@ Emit spans with `service.name`.
 **Errors Inbox:**
 Emit spans with `otel.status_code = ERROR`.
 
+**JVM Runtime page:**
+Use `opentelemetry-java-instrumentation` **< 2.0** (or ≥ 2.0 with `OTEL_SEMCONV_STABILITY_OPT_IN=jvm-dup`) and ensure metrics are exported with `service.name` and `service.instance.id`. The CPU utilization chart additionally requires `jvm.cpu.recent_utilization` (available from ~v1.19). See [JVM Runtime page](#jvm-runtime-page) for the full breakdown.
+
 **.NET VMs page:**
 Use `OpenTelemetry.Instrumentation.Runtime` **< 1.0.0** and ensure metrics are exported with `service.name` and `service.instance.id`. The UI does not yet support the stable `dotnet.*` metric names introduced in v1.0.0 — see [.NET VMs page](#net-vms-page) for the full breakdown.
+
+---
+
+## JVM Runtime page
+
+**Nerdlet:** `apm-agents.jvms`
+
+The JVM Runtime page shows memory usage by pool, garbage collection activity, thread counts, and CPU utilization for Java services. For OTel services, all charts except CPU are powered by the `process.runtime.jvm.*` metric family (pre-stable). The CPU chart uses `jvm.cpu.recent_utilization`, which is a stable metric name and the one exception to this pattern.
+
+> **SDK version caveat — the most common reason this page is blank for OTel services**
+>
+> The UI queries `process.runtime.jvm.*` metric names, which are the **pre-stable** names used by `opentelemetry-java-instrumentation` versions **before 2.0**. Starting in version 2.0, the SDK emits `jvm.*` stable names by default (e.g. `jvm.memory.used`, `jvm.thread.count`). The UI does not yet query these stable names.
+>
+> **If your customer is on `opentelemetry-java-instrumentation` ≥ 2.0, the JVM Runtime page will be mostly blank.** The CPU chart may still render because it queries `jvm.cpu.recent_utilization`, which is a stable name the UI does query. To restore all other charts, set the environment variable `OTEL_SEMCONV_STABILITY_OPT_IN=jvm-dup` — this causes the SDK to emit **both** the pre-stable and stable metric names simultaneously.
+
+All OTel queries on this page facet by `service.instance.id` (one series per running instance).
+
+### Memory charts
+
+These charts track JVM heap and non-heap memory usage. Pool names in pool-specific charts are **hardcoded to G1GC pool names** (the default GC since Java 9). Services using other GC types (ParallelGC, CMS, Shenandoah, ZGC) will see empty pool-specific charts but the `Memory usage by pool` chart (which FACETs by the `pool` attribute with no name filter) will still populate correctly.
+
+> **Known typo in query source:** Pool-specific chart queries use `process.runtime.jvm.memory.commited` (one `t`) for the Committed series. The correct metric name is `process.runtime.jvm.memory.committed` (two `t`s). The "Committed" series is always empty on pool-specific charts as a result, even if the customer is sending the correctly-named metric.
+
+| Chart title | OTel source metric | Filter / facet | Aggregation | Notes |
+|---|---|---|---|---|
+| Heap memory | `process.runtime.jvm.memory.usage` | `type = 'heap'` | `latest()` | — |
+| Non-heap memory | `process.runtime.jvm.memory.usage` | `type = 'non_heap'` | `latest()` | — |
+| Memory usage by pool | `process.runtime.jvm.memory.usage` | FACET `pool` | `latest()` | All pools; reliable fallback when pool-specific charts are empty |
+| G1 Eden Space | `process.runtime.jvm.memory.usage` + `process.runtime.jvm.memory.commited` (typo) + `process.runtime.jvm.memory.limit` | `pool = 'G1 Eden Space'` | `latest()` | Committed series blank (typo); empty if not using G1GC |
+| G1 Old Gen | same as above | `pool = 'G1 Old Gen'` | `latest()` | Committed series blank (typo); empty if not using G1GC |
+| G1 Survivor Space | same as above | `pool = 'G1 Survivor Space'` | `latest()` | Committed series blank (typo); empty if not using G1GC |
+| Metaspace | same as above | `pool = 'Metaspace'` | `latest()` | Committed series blank (typo) |
+| Compressed Class Space | same as above | `pool = 'Compressed Class Space'` | `latest()` | Committed series blank (typo); absent in Java 21+ (sealed JVM flag removed) |
+| CodeHeap non-nmethods | same as above | `pool = 'CodeHeap ''non-nmethods'''` | `latest()` | Committed series blank (typo) |
+| CodeHeap profiled nmethods | same as above | `pool = 'CodeHeap ''profiled nmethods'''` | `latest()` | Committed series blank (typo) |
+| CodeHeap non-profiled nmethods | same as above | `pool = 'CodeHeap ''non-profiled nmethods'''` | `latest()` | Committed series blank (typo) |
+
+### GC chart
+
+| Chart title | OTel source metric | Filter / facet | Aggregation | Notes |
+|---|---|---|---|---|
+| GC activity | `process.runtime.jvm.gc.duration` | FACET `gc` | `rate(sum(), 1 minute)` | One series per named GC (e.g. `G1 Young Generation`, `G1 Old Generation`) |
+
+### Thread chart
+
+| Chart title | OTel source metric | Filter / facet | Aggregation | Notes |
+|---|---|---|---|---|
+| Thread count | `process.runtime.jvm.threads.count` | — | `latest()` | Total live threads; the `daemon` attribute (`true`/`false`) distinguishes daemon vs non-daemon |
+
+### CPU chart
+
+> **Note:** This is the only JVM chart using a **stable** metric name. `jvm.cpu.recent_utilization` was never part of the pre-stable `process.runtime.jvm.*` family — it was introduced as a stable metric around `opentelemetry-java-instrumentation` v1.19. Services on older agents (< ~v1.19) will see this chart blank even if all other JVM charts are populated.
+
+| Chart title | OTel source metric | Aggregation | Notes |
+|---|---|---|---|
+| CPU utilization | `jvm.cpu.recent_utilization` | `latest()` | Stable name; only chart not using `process.runtime.jvm.*`; may be blank on very old agents (< ~v1.19) |
+
+### What the UI does NOT show for OTel Java services
+
+The following panels exist for NR agent services but have **no OTel query defined** and will not render for OTel services:
+
+- Class loading counts (`process.runtime.jvm.classes.loaded`, `.unloaded`, `.current_loaded`)
+- Buffer pool metrics (`process.runtime.jvm.buffer.usage`, `.limit`, `.count`)
+- Per-thread breakdown by daemon status as a dedicated chart
+
+### Stable SDK metric name mapping
+
+If a customer is on `opentelemetry-java-instrumentation` ≥ 2.0, their metrics arrive under the stable `jvm.*` names. Set `OTEL_SEMCONV_STABILITY_OPT_IN=jvm-dup` to emit both simultaneously. The table below maps old → new for reference and for writing workaround queries:
+
+| Pre-stable metric (UI queries this) | Stable metric (≥ v2.0, UI does NOT query this) | Attribute change |
+|---|---|---|
+| `process.runtime.jvm.memory.usage` | `jvm.memory.used` | — |
+| `process.runtime.jvm.memory.committed` | `jvm.memory.committed` | — |
+| `process.runtime.jvm.memory.limit` | `jvm.memory.limit` | — |
+| `process.runtime.jvm.memory.init` | `jvm.memory.init` | — |
+| `process.runtime.jvm.gc.duration` | `jvm.gc.duration` | — |
+| `process.runtime.jvm.threads.count` | `jvm.thread.count` | `daemon` → `thread.daemon` |
+| `process.runtime.jvm.classes.loaded` | `jvm.class.loaded` | — |
+| `process.runtime.jvm.classes.unloaded` | `jvm.class.unloaded` | — |
+| `process.runtime.jvm.classes.current_loaded` | `jvm.class.count` | — |
+| `process.runtime.jvm.buffer.usage` | `jvm.buffer.memory.usage` | — |
+| `process.runtime.jvm.buffer.limit` | `jvm.buffer.memory.limit` | — |
+| `process.runtime.jvm.buffer.count` | `jvm.buffer.count` | — |
+| `jvm.cpu.recent_utilization` | `jvm.cpu.recent_utilization` | No change — was already a stable name; queried by UI |
 
 ---
 
@@ -273,8 +361,6 @@ The .NET VMs page shows runtime health metrics for .NET services: GC heap and co
 > **If your customer is on `OpenTelemetry.Instrumentation.Runtime` ≥ 1.0.0, the .NET VMs page will be blank** because the UI still queries the old names. There is no supported workaround — this is an open bug. The diagnostic queries below can confirm which convention is being emitted.
 
 All OTel queries on this page facet by `service.instance.id` (one series per running instance). NR agent queries facet by `host` / `host.displayName` / `instanceName`.
-
----
 
 ### GC charts
 
@@ -297,8 +383,6 @@ These charts track .NET garbage collector activity. All OTel queries use the `ge
 
 > **Charts with no OTel equivalent (NR agent only):** GC Handles/Induced, GC Large Object Heap size/survived, Percent time in GC. These panels are simply absent for OTel services.
 
----
-
 ### Thread pool charts
 
 | Chart title | OTel source metric | Aggregation | Notes |
@@ -308,8 +392,6 @@ These charts track .NET garbage collector activity. All OTel queries use the `ge
 | Threadpool Queue Depth | `process.runtime.dotnet.thread_pool.queue.length` | `latest()` | Work items waiting in the queue |
 
 > **Charts with no OTel equivalent (NR agent only):** Thread completion available/in-use, thread worker available/in-use, thread throughput requested/started/queue-length. These use `newrelic.timeslice.value` with `Threadpool/*` metricTimesliceNames and are not emitted by the OTel SDK.
-
----
 
 ### CLR / runtime charts
 
@@ -321,8 +403,6 @@ These charts track .NET garbage collector activity. All OTel queries use the `ge
 | Timer Count | `process.runtime.dotnet.timer.count` | `latest()` | Active `System.Threading.Timer` instances |
 | JIT Advanced Metrics | `process.runtime.dotnet.jit.compilation_time` (ms)<br>`process.runtime.dotnet.jit.il_compiled.size` (bytes)<br>`process.runtime.dotnet.jit.methods_compiled.count` | `sum()` | JIT activity; mostly relevant during startup or with Tiered Compilation |
 
----
-
 ### What the UI does NOT show for OTel .NET services
 
 The following panels exist on the page for NR agent services but have **no OTel query defined** and will not render for OTel services regardless of SDK version:
@@ -333,8 +413,6 @@ The following panels exist on the page for NR agent services but have **no OTel 
 - GC Handles and GC Induced (`GC/Handles`, `GC/Induced`)
 - GC Large Object Heap size/survived
 - Thread completion available/in-use, thread worker available/in-use, thread throughput
-
----
 
 ### Stable SDK metric name mapping
 
@@ -361,11 +439,9 @@ If a customer is on `OpenTelemetry.Instrumentation.Runtime` ≥ 1.0.0, their met
 
 ---
 
----
-
 ## Troubleshooting
 
-### Step 1 — Is any data reaching New Relic?
+### Is any data reaching New Relic?
 
 ```
 (1) Is the service entity visible in New Relic at all?
@@ -392,8 +468,6 @@ FROM Metric, Span SELECT count(*) WHERE service.name = 'SERVICE_NAME' SINCE 1 da
 -- (2) Check which apm.service.* metrics have been synthesized
 FROM Metric SELECT uniques(metricName) WHERE metricName LIKE 'apm.service.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 ```
-
----
 
 ### Summary / Transactions page is blank
 
@@ -449,8 +523,6 @@ FROM Metric SELECT uniques(http.route) WHERE metricName = 'http.server.request.d
 -- (4) Verify synthesized apm.service.transaction.duration exists and see transaction names
 FROM Metric SELECT uniques(transactionName) WHERE metricName = 'apm.service.transaction.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 ```
-
----
 
 ### Databases page is blank
 
@@ -517,8 +589,6 @@ FROM Metric SELECT uniques(db.system) WHERE metricName = 'apm.service.datastore.
 FROM Metric SELECT uniques(db.operation) WHERE metricName = 'apm.service.datastore.operation.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 ```
 
----
-
 ### External Services page is blank
 
 ```
@@ -582,8 +652,6 @@ FROM Metric SELECT uniques(server.address) WHERE metricName = 'rpc.client.durati
 FROM Metric SELECT uniques(external.host) WHERE metricName = 'apm.service.external.host.duration' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 ```
 
----
-
 ### Transaction segment breakdown is blank or inaccurate
 
 ```
@@ -633,25 +701,38 @@ FROM Span SELECT count(*) WHERE span.kind = 'client' AND parentId IS NOT NULL AN
 -- non-zero = client spans have a parent span (context propagation working)
 ```
 
----
-
 ### Error rate is zero / Errors Inbox is empty
 
 ```
 Error rate on Summary / Transactions page is zero:
-(1) Are error attributes present on the correct metric?
-  • http.server.request.duration  → add error.type attribute on error requests
-  • http.server.duration          → add http.status_code attribute (errors counted when >= 500)
-  • rpc.server.call.duration      → add error.type attribute on error requests
-  • rpc.server.duration           → add rpc.grpc.status_code attribute (errors counted
-                                    when value is in [2, 4, 12, 13, 14, 15])
-
-(2) Verify the synthesized error count metric exists.
+(1) Are error attributes present on the server metric?
+  • http.server.request.duration  → error.type must be present on error requests
+  • http.server.duration          → http.status_code must be present (>= 500 = error)
+  • rpc.server.call.duration      → error.type must be present on error requests
+  • rpc.server.duration           → rpc.grpc.status_code must be present (2,4,12,13,14,15 = error)
+            │
+     NO ────┴──► Add the missing attribute to the correct metric.
+            │    Confirm which attributes are arriving with queries (1a)–(1d) below.
+        YES │
+            ▼
+(2) Does the synthesized apm.service.error.count metric exist?
+            │
+     NO ────┴──► Attribute may be arriving under an unexpected name or value.
+            │    Confirm with query (2) below.
+        YES │
+            ▼
+  Error rate should be populated. ✓
 
 Errors Inbox is empty:
 (3) Are failed spans setting otel.status_code = ERROR?
-  └──► Span exception events alone do NOT mark a span as an error.
-       Span status must be explicitly set to ERROR on the span itself.
+            │
+     NO ────┴──► Span exception events do NOT populate Errors Inbox on their own.
+            │    Span status must be explicitly set to ERROR on the span itself,
+            │    not just an exception event attached to the span.
+            │    Confirm with query (3) below.
+        YES │
+            ▼
+  Errors Inbox should be populated. ✓
 ```
 
 **Verification queries:**
@@ -676,7 +757,66 @@ FROM Metric SELECT uniques(transactionName) WHERE metricName = 'apm.service.erro
 FROM Span SELECT count(*) WHERE otel.status_code = 'ERROR' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 ```
 
----
+### JVM Runtime page is blank
+
+```
+(1) Is any process.runtime.jvm.* data arriving?
+            │
+     NO ────┴──► Check SDK version.
+            │    If opentelemetry-java-instrumentation >= 2.0, the SDK emits
+            │    jvm.* names instead — the UI does not support most of these yet.
+            │    Set OTEL_SEMCONV_STABILITY_OPT_IN=jvm-dup to emit both names.
+            │    Confirm with queries (1a) and (1b) below.
+        YES │
+            ▼
+(2) Is the CPU chart populated but all other charts blank?
+            │
+        YES ─┴──► SDK is >= 2.0. CPU renders because jvm.cpu.recent_utilization is
+            │    a stable name the UI does query. All other charts use
+            │    process.runtime.jvm.* names — blank when only jvm.* is emitted.
+            │    Set OTEL_SEMCONV_STABILITY_OPT_IN=jvm-dup.
+        NO  │
+            ▼
+(3) Are memory/GC/thread charts populated but the CPU chart is blank?
+            │
+        YES ─┴──► Agent version is too old to emit jvm.cpu.recent_utilization.
+            │    This metric was introduced around opentelemetry-java-instrumentation v1.19.
+            │    Upgrade to >= v1.19 to populate the CPU chart.
+        NO  │
+            ▼
+(4) Are pool-specific charts blank but "Memory usage by pool" is populated?
+            │
+        YES ─┴──► Service is using a non-G1 GC type (ParallelGC, CMS, Shenandoah, ZGC).
+            │    Pool-specific charts filter by hardcoded G1GC pool names and will be empty.
+            │    Use "Memory usage by pool" (FACET pool, no name filter) instead.
+            │    Confirm actual pool names with query (4) below.
+        NO  │
+            ▼
+(5) Is service.instance.id present on the metrics?
+            │
+     NO ────┴──► Charts render but show no series. Add service.instance.id to the
+            │    resource attributes of the OTel SDK configuration.
+            │    Confirm with query (5) below.
+        YES │
+            ▼
+  JVM Runtime page should be populated. ✓
+```
+
+**Verification queries:**
+
+```sql
+-- (1a) Check if pre-stable metrics are arriving (UI supports these)
+FROM Metric SELECT uniques(metricName) WHERE metricName LIKE 'process.runtime.jvm.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+
+-- (1b) Check if stable metrics are arriving (customer on >= v2.0, UI does NOT support most of these)
+FROM Metric SELECT uniques(metricName) WHERE metricName LIKE 'jvm.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+
+-- (4) Check actual pool names being emitted (identifies GC type in use)
+FROM Metric SELECT uniques(pool) WHERE metricName = 'process.runtime.jvm.memory.usage' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+
+-- (5) Confirm service.instance.id is present (required facet for all JVM OTel charts)
+FROM Metric SELECT uniques(service.instance.id) WHERE metricName LIKE 'process.runtime.jvm.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+```
 
 ### .NET VMs page is blank
 
