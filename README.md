@@ -14,10 +14,23 @@ New Relic does not display raw OpenTelemetry data directly in the APM UI. Instea
   - [`apm.service.external.host.duration`](#apmserviceexternalhostduration)
   - [`apm.service.datastore.operation.duration`](#apmservicedatastoreoperationduration)
 - [Special cases](#special-cases)
+  - [Messaging / non-web transactions](#messaging--non-web-transactions)
+  - [Ruby](#ruby)
+  - [Any span-derived metric](#any-span-derived-metric)
 - [What data is needed](#what-data-is-needed)
 - [JVM Runtime page](#jvm-runtime-page)
 - [.NET VMs page](#net-vms-page)
+- [Go Runtime page](#go-runtime-page)
 - [Troubleshooting](#troubleshooting)
+  - [Is any data reaching New Relic?](#is-any-data-reaching-new-relic)
+  - [Summary / Transactions page is blank](#summary--transactions-page-is-blank)
+  - [Databases page is blank](#databases-page-is-blank)
+  - [External Services page is blank](#external-services-page-is-blank)
+  - [Transaction segment breakdown is blank or inaccurate](#transaction-segment-breakdown-is-blank-or-inaccurate)
+  - [Error rate is zero / Errors Inbox is empty](#error-rate-is-zero--errors-inbox-is-empty)
+  - [JVM Runtime page is blank](#jvm-runtime-page-is-blank)
+  - [.NET VMs page is blank](#net-vms-page-is-blank)
+  - [Go Runtime page is blank](#go-runtime-page-is-blank)
 
 ---
 
@@ -64,7 +77,7 @@ New Relic does not display raw OpenTelemetry data directly in the APM UI. Instea
 | **Errors Inbox**                          | —                                                                                   | Spans with `otel.status_code = ERROR`                |
 | **Logs**                                  | —                                                                                   | Logs                                                 |
 | **JVM Runtime**                           | —                                                                                   | `process.runtime.jvm.*` metrics ([otel-spec v1.17](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.17.0/specification/metrics/semantic_conventions/runtime-environment-metrics.md), pre-stable) + `jvm.cpu.recent_utilization` ([semconv v1.26](https://github.com/open-telemetry/semantic-conventions/blob/v1.26.0/docs/runtime/jvm-metrics.md), stable) — see [JVM Runtime page](#jvm-runtime-page) |
-| **Go Runtime**                            | —                                                                                   | Go runtime metrics (OTel Go contrib)                 |
+| **Go Runtime**                            | —                                                                                   | `runtime.go.*` metrics (legacy names) via [`go.opentelemetry.io/contrib/instrumentation/runtime`](https://pkg.go.dev/go.opentelemetry.io/contrib/instrumentation/runtime) — current SDK emits stable `go.*` by default; set `OTEL_GO_X_DEPRECATED_RUNTIME_METRICS=true` to restore legacy names — see [Go Runtime page](#go-runtime-page) |
 | **.NET VMs**                              | —                                                                                   | `process.runtime.dotnet.*` metrics — pre-stable SDK only (see [.NET VMs page](#net-vms-page)) |
 
 ---
@@ -262,6 +275,9 @@ Use `opentelemetry-java-instrumentation` **< 2.0** (or ≥ 2.0 with `OTEL_SEMCON
 **.NET VMs page:**
 Use `OpenTelemetry.Instrumentation.Runtime` **< 1.0.0** and ensure metrics are exported with `service.name` and `service.instance.id`. The UI does not yet support the stable `dotnet.*` metric names introduced in v1.0.0 — see [.NET VMs page](#net-vms-page) for the full breakdown.
 
+**Go Runtime page:**
+Use [`go.opentelemetry.io/contrib/instrumentation/runtime`](https://pkg.go.dev/go.opentelemetry.io/contrib/instrumentation/runtime) and set `OTEL_GO_X_DEPRECATED_RUNTIME_METRICS=true` to emit legacy `runtime.go.*` metrics alongside the stable `go.*` defaults. Ensure metrics are exported with `service.name` and `service.instance.id` — see [Go Runtime page](#go-runtime-page) for the full breakdown.
+
 ---
 
 ## JVM Runtime page
@@ -436,6 +452,89 @@ If a customer is on `OpenTelemetry.Instrumentation.Runtime` ≥ 1.0.0, their met
 | `process.runtime.dotnet.jit.compilation_time` | `dotnet.jit.compilation_time` | — |
 | `process.runtime.dotnet.jit.il_compiled.size` | `dotnet.jit.compiled_il.size` | — |
 | `process.runtime.dotnet.jit.methods_compiled.count` | `dotnet.jit.compiled_methods` | — |
+
+---
+
+## Go Runtime page
+
+**Nerdlet:** `apm-agents.go-runtime` *(unverified — confirm from GHE)*
+
+The Go Runtime page shows heap memory usage, garbage collector activity, goroutine counts, and process-level metrics for Go services. For OTel services, all charts are powered by the `runtime.go.*` metric family emitted by [`go.opentelemetry.io/contrib/instrumentation/runtime`](https://pkg.go.dev/go.opentelemetry.io/contrib/instrumentation/runtime).
+
+> **SDK version caveat — the most common reason this page is blank for OTel services**
+>
+> The UI queries `runtime.go.*` metric names, which are the **legacy** names emitted by earlier versions of `go.opentelemetry.io/contrib/instrumentation/runtime`. Current versions of the library now emit `go.*` stable metric names by default (e.g. `go.memory.used`, `go.goroutine.count`). The legacy names are no longer emitted unless opted in.
+>
+> **If your customer is on a current version of `go.opentelemetry.io/contrib/instrumentation/runtime`, the Go Runtime page will be blank** because the UI still queries the old `runtime.go.*` names. To restore all charts, set the environment variable `OTEL_GO_X_DEPRECATED_RUNTIME_METRICS=true` — this causes the library to emit **both** the stable `go.*` and legacy `runtime.go.*` metrics simultaneously.
+
+All OTel queries on this page facet by `service.instance.id` (one series per running instance).
+
+### Memory charts
+
+> **Note:** Chart titles below are based on the legacy metric names and may not exactly match UI labels — could not be verified from source (GHE inaccessible).
+
+| Chart title | OTel source metric | Aggregation | Notes |
+|---|---|---|---|
+| Heap allocated | `runtime.go.mem.heap_alloc` | `latest()` | Live heap bytes allocated; includes garbage not yet collected |
+| Heap in-use | `runtime.go.mem.heap_inuse` | `latest()` | Bytes in in-use spans — always ≥ heap_alloc |
+| Heap from OS | `runtime.go.mem.heap_sys` | `latest()` | Total bytes obtained from the OS for the heap |
+| Heap idle | `runtime.go.mem.heap_idle` | `latest()` | Bytes in idle (unused) spans; returned to OS over time |
+| Heap released | `runtime.go.mem.heap_released` | `latest()` | Idle bytes whose physical pages have been returned to the OS |
+| Live heap objects | `runtime.go.mem.live_objects` | `latest()` | Live objects — cumulative Mallocs minus Frees |
+| Heap objects | `runtime.go.mem.heap_objects` | `latest()` | Count of allocated heap objects |
+
+### GC charts
+
+| Chart title | OTel source metric | Aggregation | Notes |
+|---|---|---|---|
+| GC count | `runtime.go.gc.count` | `rate(sum(), 1 minute)` | Completed GC cycles per minute |
+| GC pause | `runtime.go.gc.pause_ns` | `rate(sum(), 1 minute)` | GC stop-the-world pause duration histogram (nanoseconds) |
+| GC pause total | `runtime.go.gc.pause_total_ns` | `latest()` | Cumulative GC pause time since process start (nanoseconds) |
+
+### Goroutine chart
+
+| Chart title | OTel source metric | Aggregation | Notes |
+|---|---|---|---|
+| Goroutines | `runtime.go.goroutines` | `latest()` | Number of live goroutines |
+
+### Other charts
+
+| Chart title | OTel source metric | Aggregation | Notes |
+|---|---|---|---|
+| CGO calls | `runtime.go.cgo.calls` | `rate(sum(), 1 minute)` | Completed cgo calls per minute; only relevant if the service uses CGO |
+| Pointer lookups | `runtime.go.lookups` | `rate(sum(), 1 minute)` | Pointer lookups performed by the runtime per minute |
+| Uptime | `runtime.uptime` | `latest()` | Process uptime (milliseconds since start) |
+
+### What the UI does NOT show for OTel Go services
+
+The stable `go.*` metrics added signals not present in the legacy model. These have no corresponding chart on the Go Runtime page:
+
+- Memory type breakdown (`go.memory.used` FACET `go.memory.type`) — stack vs other memory; not tracked in legacy set
+- Memory limit (`go.memory.limit`) — `GOMEMLIMIT`-based limit; not in legacy set; only emitted when limit is configured
+- GC heap goal (`go.memory.gc.goal`) — heap target size at end of GC cycle; not in legacy set
+- Processor limit (`go.processor.limit`) — GOMAXPROCS value; no chart on the page
+- GOGC setting (`go.config.gogc`) — GC target percentage; no chart on the page
+
+### Stable SDK metric name mapping
+
+If a customer is on a current version of `go.opentelemetry.io/contrib/instrumentation/runtime`, their metrics arrive under the stable `go.*` names. Set `OTEL_GO_X_DEPRECATED_RUNTIME_METRICS=true` to emit both simultaneously. The table below maps legacy → stable for reference and for writing workaround queries:
+
+| Legacy metric (UI queries this) | Stable metric (current default, UI does NOT query this) | Notes |
+|---|---|---|
+| `runtime.go.mem.heap_alloc` | `go.memory.allocated` | Semantically similar; stable tracks bytes allocated to heap |
+| `runtime.go.mem.heap_inuse` | approx. `go.memory.used` WHERE `go.memory.type = 'other'` | No direct equivalent; stable collapses heap into a memory-type model |
+| `runtime.go.mem.heap_sys` | No direct equivalent | Removed from stable model |
+| `runtime.go.mem.heap_idle` | No direct equivalent | Removed from stable model |
+| `runtime.go.mem.heap_released` | No direct equivalent | Removed from stable model |
+| `runtime.go.mem.heap_objects` | `go.memory.allocations` | Different meaning: stable tracks cumulative alloc count, not live object count |
+| `runtime.go.mem.live_objects` | No direct equivalent | Removed from stable model |
+| `runtime.go.goroutines` | `go.goroutine.count` | Direct equivalent |
+| `runtime.go.gc.count` | No direct equivalent | GC cycle count removed from stable metrics |
+| `runtime.go.gc.pause_ns` | No direct equivalent | GC pause histogram removed from stable metrics |
+| `runtime.go.gc.pause_total_ns` | No direct equivalent | Removed from stable model |
+| `runtime.go.cgo.calls` | No direct equivalent | CGO call tracking removed from stable metrics |
+| `runtime.go.lookups` | No direct equivalent | Pointer lookup tracking removed from stable metrics |
+| `runtime.uptime` | No direct equivalent | Process uptime removed from stable metrics |
 
 ---
 
@@ -771,7 +870,7 @@ FROM Span SELECT count(*) WHERE otel.status_code = 'ERROR' AND service.name = 'S
             ▼
 (2) Is the CPU chart populated but all other charts blank?
             │
-        YES ─┴──► SDK is >= 2.0. CPU renders because jvm.cpu.recent_utilization is
+     YES ───┴──► SDK is >= 2.0. CPU renders because jvm.cpu.recent_utilization is
             │    a stable name the UI does query. All other charts use
             │    process.runtime.jvm.* names — blank when only jvm.* is emitted.
             │    Set OTEL_SEMCONV_STABILITY_OPT_IN=jvm-dup.
@@ -779,14 +878,14 @@ FROM Span SELECT count(*) WHERE otel.status_code = 'ERROR' AND service.name = 'S
             ▼
 (3) Are memory/GC/thread charts populated but the CPU chart is blank?
             │
-        YES ─┴──► Agent version is too old to emit jvm.cpu.recent_utilization.
+     YES ───┴──► Agent version is too old to emit jvm.cpu.recent_utilization.
             │    This metric was introduced around opentelemetry-java-instrumentation v1.19.
             │    Upgrade to >= v1.19 to populate the CPU chart.
         NO  │
             ▼
 (4) Are pool-specific charts blank but "Memory usage by pool" is populated?
             │
-        YES ─┴──► Service is using a non-G1 GC type (ParallelGC, CMS, Shenandoah, ZGC).
+     YES ───┴──► Service is using a non-G1 GC type (ParallelGC, CMS, Shenandoah, ZGC).
             │    Pool-specific charts filter by hardcoded G1GC pool names and will be empty.
             │    Use "Memory usage by pool" (FACET pool, no name filter) instead.
             │    Confirm actual pool names with query (4) below.
@@ -832,7 +931,7 @@ FROM Metric SELECT uniques(service.instance.id) WHERE metricName LIKE 'process.r
             ▼
 (2) Are only some charts blank (e.g. GC charts blank but thread pool populated)?
             │
-        YES ─┴──► The metric is arriving but a generation attribute filter is mismatched.
+     YES ───┴──► The metric is arriving but a generation attribute filter is mismatched.
             │    GC charts filter WHERE generation = '0'/'1'/'2'. On the stable SDK
             │    (>= v1.0.0) this attribute is gc.heap.generation — the filter never matches.
             │    Confirm with queries (3a) and (3b) below.
@@ -865,4 +964,46 @@ FROM Metric SELECT uniques(`gc.heap.generation`) WHERE metricName = 'process.run
 
 -- (4) Confirm service.instance.id is present (required facet for all .NET VMs OTel charts)
 FROM Metric SELECT uniques(service.instance.id) WHERE metricName LIKE 'process.runtime.dotnet.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+```
+
+### Go Runtime page is blank
+
+```
+(1) Is any runtime.go.* data arriving?
+            │
+     NO ────┴──► Check SDK version.
+            │    Current versions of go.opentelemetry.io/contrib/instrumentation/runtime
+            │    emit stable go.* names by default — the UI queries runtime.go.* (legacy).
+            │    Set OTEL_GO_X_DEPRECATED_RUNTIME_METRICS=true to emit both naming schemes.
+            │    Confirm with queries (1a) and (1b) below.
+        YES │
+            ▼
+(2) Are only some charts blank?
+            │
+     YES ───┴──► runtime.go.* metrics are arriving but some are absent.
+            │    Confirm which specific metrics are present with query (1a).
+            │    Cross-reference with the chart tables in Go Runtime page above.
+        NO  │
+            ▼
+(3) Is service.instance.id present on the metrics?
+            │
+     NO ────┴──► Charts render but show no series. Add service.instance.id to the
+            │    resource attributes of the OTel SDK configuration.
+            │    Confirm with query (3) below.
+        YES │
+            ▼
+  Go Runtime page should be populated. ✓
+```
+
+**Verification queries:**
+
+```sql
+-- (1a) Check if legacy metrics are arriving (UI supports these)
+FROM Metric SELECT uniques(metricName) WHERE metricName LIKE 'runtime.go.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+
+-- (1b) Check if stable metrics are arriving (current default, UI does NOT query these)
+FROM Metric SELECT uniques(metricName) WHERE metricName LIKE 'go.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+
+-- (3) Confirm service.instance.id is present (required facet for all Go Runtime OTel charts)
+FROM Metric SELECT uniques(service.instance.id) WHERE metricName LIKE 'runtime.go.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 ```
