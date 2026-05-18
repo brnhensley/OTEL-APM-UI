@@ -273,7 +273,7 @@ Emit spans with `otel.status_code = ERROR`.
 Use `opentelemetry-java-instrumentation` **< 2.0** (or ≥ 2.0 with `OTEL_SEMCONV_STABILITY_OPT_IN=jvm-dup`) and ensure metrics are exported with `service.name` and `service.instance.id`. The CPU utilization chart additionally requires `jvm.cpu.recent_utilization` (available from ~v1.19). See [JVM Runtime page](#jvm-runtime-page) for the full breakdown.
 
 **.NET VMs page:**
-Use `OpenTelemetry.Instrumentation.Runtime` **< 1.0.0** and ensure metrics are exported with `service.name` and `service.instance.id`. The UI does not yet support the stable `dotnet.*` metric names introduced in v1.0.0 — see [.NET VMs page](#net-vms-page) for the full breakdown.
+Use **.NET 6–8**, or .NET 9+ with `OpenTelemetry.Instrumentation.Runtime` **< v1.10.0**, and ensure metrics are exported with `service.name` and `service.instance.id`. On .NET 9+ with v1.10.0+, the package delegates to built-in `System.Runtime` OTel metrics that emit `dotnet.*` names the UI does not yet query — see [.NET VMs page](#net-vms-page) for the full breakdown.
 
 **Go Runtime page:**
 Use [`go.opentelemetry.io/contrib/instrumentation/runtime`](https://pkg.go.dev/go.opentelemetry.io/contrib/instrumentation/runtime) and set `OTEL_GO_X_DEPRECATED_RUNTIME_METRICS=true` to emit legacy `runtime.go.*` metrics alongside the stable `go.*` defaults. Ensure metrics are exported with `service.name` and `service.instance.id` — see [Go Runtime page](#go-runtime-page) for the full breakdown.
@@ -372,15 +372,15 @@ The .NET VMs page shows runtime health metrics for .NET services: GC heap and co
 
 > **SDK version caveat — the most common reason this page is blank for OTel services**
 >
-> The UI queries `process.runtime.dotnet.*` metric names, which are the **pre-stable** names used by `OpenTelemetry.Instrumentation.Runtime` versions **before v1.0.0**. Starting in v1.0.0, the library was stabilized and the metric names changed to `dotnet.*` (e.g. `dotnet.gc.collections`, `dotnet.thread_pool.thread.count`). The attribute that filters GC charts by heap generation also changed from `generation` to `gc.heap.generation`.
+> The UI queries `process.runtime.dotnet.*` metric names. `OpenTelemetry.Instrumentation.Runtime` has used these names across **all** its versions — the package itself never renamed its metrics. However, starting with **.NET 9**, Microsoft introduced built-in OTel support via `System.Runtime` metrics that follow the [stable OTel semconv](https://opentelemetry.io/docs/specs/semconv/runtime/dotnet-metrics/) (`dotnet.gc.*`, `dotnet.thread_pool.*`, etc.). `OpenTelemetry.Instrumentation.Runtime` **v1.10.0+** delegates to these built-in metrics on .NET 9+, so customers on that combination emit `dotnet.*` names instead of `process.runtime.dotnet.*`. The GC generation attribute also changes from `generation` (values: `'0'`/`'1'`/`'2'`) to `gc.heap.generation` (values: `'gen0'`/`'gen1'`/`'gen2'`).
 >
-> **If your customer is on `OpenTelemetry.Instrumentation.Runtime` ≥ 1.0.0, the .NET VMs page will be blank** because the UI still queries the old names. There is no supported workaround — this is an open bug. The diagnostic queries below can confirm which convention is being emitted.
+> **If your customer is on .NET 9+ with `OpenTelemetry.Instrumentation.Runtime` ≥ v1.10.0, the .NET VMs page will be blank** because the UI still queries `process.runtime.dotnet.*`. There is no supported workaround — this is an open bug tracked as [NR-467798](https://new-relic.atlassian.net/browse/NR-467798). A feature request to add stable semconv support (modeled on the JVM semconv-detection pattern) has been filed with the APM+ Foundations team. The diagnostic queries below can confirm which convention is being emitted.
 
 All OTel queries on this page facet by `service.instance.id` (one series per running instance). NR agent queries facet by `host` / `host.displayName` / `instanceName`.
 
 ### GC charts
 
-These charts track .NET garbage collector activity. All OTel queries use the `generation` attribute (values: `'0'`, `'1'`, `'2'`, `'poh'`) to filter by heap generation. In the stable SDK this attribute was renamed `gc.heap.generation`, so customers on ≥ v1.0.0 will see empty filters even if the metric arrives under the old name.
+These charts track .NET garbage collector activity. All OTel queries use the `generation` attribute (values: `'0'`, `'1'`, `'2'`, `'poh'`) to filter by heap generation. On .NET 9+ with `OpenTelemetry.Instrumentation.Runtime` ≥ v1.10.0, this attribute is renamed to `gc.heap.generation` — however, on that combination the metric names also change to `dotnet.*`, so the entire page is blank before the attribute difference becomes relevant.
 
 | Chart title | OTel source metric | Filter attribute | Aggregation | Notes |
 |---|---|---|---|---|
@@ -432,9 +432,9 @@ The following panels exist on the page for NR agent services but have **no OTel 
 
 ### Stable SDK metric name mapping
 
-If a customer is on `OpenTelemetry.Instrumentation.Runtime` ≥ 1.0.0, their metrics arrive under the stable `dotnet.*` names. The UI does not query these yet. The table below maps old → new for reference and for writing workaround queries:
+If a customer is on **.NET 9+ with `OpenTelemetry.Instrumentation.Runtime` ≥ v1.10.0**, their metrics arrive under the stable `dotnet.*` names via built-in `System.Runtime` OTel support. The UI does not query these yet. The table below maps old → new for reference and for writing workaround queries:
 
-| Pre-stable metric (UI queries this) | Stable metric (≥ v1.0.0, UI does NOT query this) | Attribute change |
+| Pre-stable metric (UI queries this) | Stable metric (.NET 9+ ≥ v1.10.0, UI does NOT query this) | Attribute change |
 |---|---|---|
 | `process.runtime.dotnet.gc.collections.count` | `dotnet.gc.collections` | `generation` → `gc.heap.generation` |
 | `process.runtime.dotnet.gc.objects.size` | `dotnet.gc.heap.total_allocated` | — |
@@ -923,18 +923,23 @@ FROM Metric SELECT uniques(service.instance.id) WHERE metricName LIKE 'process.r
 (1) Is any process.runtime.dotnet.* data arriving?
             │
      NO ────┴──► Check SDK version.
-            │    If OpenTelemetry.Instrumentation.Runtime >= 1.0.0, the SDK emits
-            │    dotnet.* names instead — the UI does not support these yet (known bug).
+            │    If the customer is on .NET 9+ with OpenTelemetry.Instrumentation.Runtime
+            │    >= v1.10.0, the app emits dotnet.* names via built-in System.Runtime
+            │    OTel metrics — the UI does not support these yet (NR-467798).
+            │    Note: the package itself never renamed its metrics; the dotnet.* names
+            │    come from .NET 9's built-in support, not a package version change.
             │    Confirm with queries (1a) and (1b) below.
-            │    Downgrade to < 1.0.0 as a temporary workaround.
         YES │
             ▼
 (2) Are only some charts blank (e.g. GC charts blank but thread pool populated)?
             │
-     YES ───┴──► The metric is arriving but a generation attribute filter is mismatched.
-            │    GC charts filter WHERE generation = '0'/'1'/'2'. On the stable SDK
-            │    (>= v1.0.0) this attribute is gc.heap.generation — the filter never matches.
-            │    Confirm with queries (3a) and (3b) below.
+     YES ───┴──► Verify that the other chart groups are actually populated — customers
+            │    often report only the chart they noticed. If the customer is on .NET 9+
+            │    with OpenTelemetry.Instrumentation.Runtime >= v1.10.0, the entire page
+            │    will be blank (metric name change), not just GC. If GC charts are
+            │    genuinely the only ones blank, check generation attribute values with
+            │    query (3a) — a mismatch (e.g. 'gen0' vs '0') is theoretically possible
+            │    on some pre-.NET 9 SDK versions but has not been confirmed by a case.
         NO  │
             ▼
 (3) Is service.instance.id present on the metrics?
@@ -953,14 +958,14 @@ FROM Metric SELECT uniques(service.instance.id) WHERE metricName LIKE 'process.r
 -- (1a) Check if pre-stable metrics are arriving (UI supports these)
 FROM Metric SELECT uniques(metricName) WHERE metricName LIKE 'process.runtime.dotnet.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
--- (1b) Check if stable metrics are arriving (customer on >= v1.0.0, UI does NOT support these)
+-- (1b) Check if stable metrics are arriving (customer on .NET 9+ with >= v1.10.0, UI does NOT support these)
 FROM Metric SELECT uniques(metricName) WHERE metricName LIKE 'dotnet.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
--- (3a) Check generation attribute on GC metrics (pre-stable SDK emits 'generation')
+-- (3a) Check generation attribute values on GC metrics (pre-stable SDK; expected values: '0', '1', '2', 'poh')
 FROM Metric SELECT uniques(generation) WHERE metricName = 'process.runtime.dotnet.gc.collections.count' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
--- (3b) Check gc.heap.generation attribute on GC metrics (stable SDK >= v1.0.0 emits this instead)
-FROM Metric SELECT uniques(`gc.heap.generation`) WHERE metricName = 'process.runtime.dotnet.gc.collections.count' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+-- (3b) If on stable SDK (.NET 9+ with >= v1.10.0), confirm gc.heap.generation values on the stable metric name
+FROM Metric SELECT uniques(`gc.heap.generation`) WHERE metricName = 'dotnet.gc.collections' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
 
 -- (4) Confirm service.instance.id is present (required facet for all .NET VMs OTel charts)
 FROM Metric SELECT uniques(service.instance.id) WHERE metricName LIKE 'process.runtime.dotnet.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
