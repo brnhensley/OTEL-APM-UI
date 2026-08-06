@@ -99,9 +99,10 @@ Synthesized from one of these **server-side HTTP or RPC metrics**.
 
 Transaction name formats:
 
-- HTTP: `WebTransaction/server/{http.request.method} {http.route}`
-- RPC v1.40: `WebTransaction/server/{rpc.system.name}/{rpc.method}` _(no service segment)_
-- RPC v1.20 _(legacy)_: `WebTransaction/server/{rpc.system}/{rpc.service}.{rpc.method}`
+- `http.server.request.duration`: `WebTransaction/server/{http.request.method} {http.route}`
+- `http.server.duration`:         `WebTransaction/server/{http.method} {http.route}`
+- `rpc.server.call.duration`:     `WebTransaction/server/{rpc.system.name}/{rpc.method}` _(no service segment)_
+- `rpc.server.duration`:          `WebTransaction/server/{rpc.system}/{rpc.service}.{rpc.method}`
 
 > **Note:** Unlike New Relic language agents, OTel services do **not** produce `Transaction` events or transaction traces. The `transactionName` attribute exists only as an attribute on the `apm.service.transaction.duration` metric.
 
