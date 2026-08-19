@@ -7,6 +7,7 @@ New Relic does not display raw OpenTelemetry data directly in the APM UI. Instea
 ## Contents
 
 - [How it works](#how-it-works-the-short-version)
+- [Resource attributes on all `apm.service.*` metrics](#resource-attributes-on-all-apmservice-metrics)
 - [Quick reference](#quick-reference-what-does-each-ui-section-need)
 - [Metric-by-metric breakdown](#metric-by-metric-breakdown)
   - [`apm.service.transaction.duration`](#apmservicetransactionduration)
@@ -59,6 +60,25 @@ New Relic does not display raw OpenTelemetry data directly in the APM UI. Instea
 ```
 
 **Metrics are preferred over spans** because spans are typically sampled and may not represent 100% of traffic.
+
+---
+
+## Resource attributes on all `apm.service.*` metrics
+
+Regardless of which `apm.service.*` metric is synthesized, New Relic copies the same fixed set of resource attributes from the source OTel data onto it. **No other resource attributes are added** — anything not in this list is not carried over from the source data:
+
+- `container.id`
+- `entity.guid`
+- `entity.name`
+- `host.name`
+- `instrumentation.provider`
+- `k8s.cluster.name`
+- `k8s.container.name`
+- `k8s.namespace.name`
+- `k8s.pod.name`
+- `service.instance.id`
+- `service.name`
+- `service.namespace`
 
 ---
 
