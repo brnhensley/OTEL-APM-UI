@@ -566,14 +566,14 @@ If a customer is on a current version of `go.opentelemetry.io/contrib/instrument
 ```
 (1) Is the service entity visible in New Relic at all?
             │
-     NO ────┴──► Data is not reaching New Relic.
-                 Check the OTel exporter endpoint and API key.
+     NO ────┼──► Data is not reaching New Relic.
+            │    Check the OTel exporter endpoint and API key.
         YES │
             ▼
 (2) Have apm.service.* metrics been synthesized?
             │
-     NO ────┴──► Raw data is arriving but synthesis has not occurred.
-                 Check that metrics and spans include service.name.
+     NO ────┼──► Raw data is arriving but synthesis has not occurred.
+            │    Check that metrics and spans include service.name.
         YES │
             ▼
   Use the symptom-specific trees below for the affected page. ✓
@@ -598,7 +598,7 @@ FROM Metric SELECT uniques(metricName) WHERE metricName LIKE 'apm.service.%' AND
   • rpc.server.call.duration      (RPC v1.40)
   • rpc.server.duration           (RPC v1.20 legacy)
             │
-     NO ────┴──► No recognized server metric found.
+     NO ────┼──► No recognized server metric found.
             │     Emit one of the above from the HTTP or RPC server instrumentation.
         YES │
             ▼
@@ -608,7 +608,7 @@ FROM Metric SELECT uniques(metricName) WHERE metricName LIKE 'apm.service.%' AND
   • rpc.server.call.duration      → rpc.system.name must be present
   • rpc.server.duration           → rpc.system must be present
             │
-     NO ────┴──► Add the missing required attribute to the metric indicated above.
+     NO ────┼──► Add the missing required attribute to the metric indicated above.
             │    If it's present but still failing, a FallbackServer rule may match first and
             │    produce transactionName = WebTransaction/server/unknown. Check query (4).
             │
@@ -649,14 +649,14 @@ FROM Metric SELECT uniques(transactionName) WHERE metricName = 'apm.service.tran
 ```
 (1) Is this a Ruby service?
             │
-    YES ────┴──► Ruby emits no metrics. DB data comes from spans only.
+    YES ────┼──► Ruby emits no metrics. DB data comes from spans only.
             │    Ensure DB client spans are emitted with db.system present.
             │    Skip to step (3).
         NO  │
             ▼
 (2) Do DB spans have db.system.name?  (v1.33 stable convention)
             │
-    YES ────┴──► (3) Is db.client.operation.duration also being emitted?
+    YES ────┼──► (3) Is db.client.operation.duration also being emitted?
             │         NO  → The DB instrumentation library emits spans but not the
             │               db.client.operation.duration metric yet.
             │               Check for a newer version of the DB instrumentation library.
@@ -665,7 +665,7 @@ FROM Metric SELECT uniques(transactionName) WHERE metricName = 'apm.service.tran
             ▼
 (3) Do DB spans have db.system?  (v1.24 legacy convention)
             │
-     NO ────┴──► DB spans are missing both db.system and db.system.name.
+     NO ────┼──► DB spans are missing both db.system and db.system.name.
             │    Check the DB instrumentation library.
         YES │
             ▼
@@ -718,7 +718,7 @@ FROM Metric SELECT uniques(db.operation) WHERE metricName = 'apm.service.datasto
   • rpc.client.call.duration      (RPC v1.40)
   • rpc.client.duration           (RPC v1.20 legacy)
             │
-     NO ────┴──► No recognized client metric found.
+     NO ────┼──► No recognized client metric found.
             │     Emit one of the above from the outbound HTTP or RPC client instrumentation.
         YES │
             ▼
@@ -728,7 +728,7 @@ FROM Metric SELECT uniques(db.operation) WHERE metricName = 'apm.service.datasto
   • rpc.client.call.duration      → rpc.system.name must be present
   • rpc.client.duration           → rpc.system must be present
             │
-     NO ────┴──► Add the missing required attribute to the metric indicated above.
+     NO ────┼──► Add the missing required attribute to the metric indicated above.
             │
         YES │
             ▼
@@ -777,7 +777,7 @@ FROM Metric SELECT uniques(external.host) WHERE metricName = 'apm.service.extern
 ```
 (1) Are spans being emitted at all?
             │
-     NO ────┴──► Enable span export in the OTel SDK configuration.
+     NO ────┼──► Enable span export in the OTel SDK configuration.
             │
         YES │
             ▼
@@ -786,7 +786,7 @@ FROM Metric SELECT uniques(external.host) WHERE metricName = 'apm.service.extern
   • Inbound messaging consumers → span.kind = consumer
   • Outbound DB / HTTP / RPC calls → span.kind = client
             │
-     NO ────┴──► span.kind is missing or incorrect on the spans.
+     NO ────┼──► span.kind is missing or incorrect on the spans.
             │     Check the instrumentation library — span.kind is usually set automatically
             │     by OTel instrumentation libraries, not manually.
         YES │
@@ -794,7 +794,7 @@ FROM Metric SELECT uniques(external.host) WHERE metricName = 'apm.service.extern
 (3) Are client spans children of the server span in the same trace?
 (i.e. DB/HTTP/RPC client spans are nested under the inbound server span)
             │
-     NO ────┴──► Context propagation may be broken.
+     NO ────┼──► Context propagation may be broken.
             │     Ensure the OTel SDK has context propagation configured and that
             │     downstream calls inherit the active span context.
         YES │
@@ -831,13 +831,13 @@ Error rate on Summary / Transactions page is zero:
   • rpc.server.call.duration      → error.type must be present on error requests
   • rpc.server.duration           → rpc.grpc.status_code must be present (2,4,12,13,14,15 = error)
             │
-     NO ────┴──► Add the missing attribute to the correct metric.
+     NO ────┼──► Add the missing attribute to the correct metric.
             │    Confirm which attributes are arriving with queries (1a)–(1d) below.
         YES │
             ▼
 (2) Does the synthesized apm.service.error.count metric exist?
             │
-     NO ────┴──► Attribute may be arriving under an unexpected name or value.
+     NO ────┼──► Attribute may be arriving under an unexpected name or value.
             │    Confirm with query (2) below.
         YES │
             ▼
@@ -846,7 +846,7 @@ Error rate on Summary / Transactions page is zero:
 Errors Inbox is empty:
 (3) Are failed spans setting otel.status_code = ERROR?
             │
-     NO ────┴──► Span exception events do NOT populate Errors Inbox on their own.
+     NO ────┼──► Span exception events do NOT populate Errors Inbox on their own.
             │    Span status must be explicitly set to ERROR on the span itself,
             │    not just an exception event attached to the span.
             │    Confirm with query (3) below.
@@ -882,7 +882,7 @@ FROM Span SELECT count(*) WHERE otel.status_code = 'ERROR' AND service.name = 'S
 ```
 (1) Is any process.runtime.jvm.* data arriving?
             │
-     NO ────┴──► Check SDK version.
+     NO ────┼──► Check SDK version.
             │    If opentelemetry-java-instrumentation >= 2.0, the SDK emits
             │    jvm.* names instead — the UI does not support most of these yet.
             │    Set OTEL_SEMCONV_STABILITY_OPT_IN=jvm-dup to emit both names.
@@ -891,7 +891,7 @@ FROM Span SELECT count(*) WHERE otel.status_code = 'ERROR' AND service.name = 'S
             ▼
 (2) Is the CPU chart populated but all other charts blank?
             │
-     YES ───┴──► SDK is >= 2.0. CPU renders because jvm.cpu.recent_utilization is
+     YES ───┼──► SDK is >= 2.0. CPU renders because jvm.cpu.recent_utilization is
             │    a stable name the UI does query. All other charts use
             │    process.runtime.jvm.* names — blank when only jvm.* is emitted.
             │    Set OTEL_SEMCONV_STABILITY_OPT_IN=jvm-dup.
@@ -899,14 +899,14 @@ FROM Span SELECT count(*) WHERE otel.status_code = 'ERROR' AND service.name = 'S
             ▼
 (3) Are memory/GC/thread charts populated but the CPU chart is blank?
             │
-     YES ───┴──► Agent version is too old to emit jvm.cpu.recent_utilization.
+     YES ───┼──► Agent version is too old to emit jvm.cpu.recent_utilization.
             │    This metric was introduced around opentelemetry-java-instrumentation v1.19.
             │    Upgrade to >= v1.19 to populate the CPU chart.
         NO  │
             ▼
 (4) Are pool-specific charts blank but "Memory usage by pool" is populated?
             │
-     YES ───┴──► Service is using a non-G1 GC type (ParallelGC, CMS, Shenandoah, ZGC).
+     YES ───┼──► Service is using a non-G1 GC type (ParallelGC, CMS, Shenandoah, ZGC).
             │    Pool-specific charts filter by hardcoded G1GC pool names and will be empty.
             │    Use "Memory usage by pool" (FACET pool, no name filter) instead.
             │    Confirm actual pool names with query (4) below.
@@ -914,7 +914,7 @@ FROM Span SELECT count(*) WHERE otel.status_code = 'ERROR' AND service.name = 'S
             ▼
 (5) Is service.instance.id present on the metrics?
             │
-     NO ────┴──► Charts render but show no series. Add service.instance.id to the
+     NO ────┼──► Charts render but show no series. Add service.instance.id to the
             │    resource attributes of the OTel SDK configuration.
             │    Confirm with query (5) below.
         YES │
@@ -943,7 +943,7 @@ FROM Metric SELECT uniques(service.instance.id) WHERE metricName LIKE 'process.r
 ```
 (1) Is any process.runtime.dotnet.* data arriving?
             │
-     NO ────┴──► Check SDK version.
+     NO ────┼──► Check SDK version.
             │    If the customer is on .NET 9+ with OpenTelemetry.Instrumentation.Runtime
             │    >= v1.10.0, the app emits dotnet.* names via built-in System.Runtime
             │    OTel metrics — the UI does not support these yet (NR-467798).
@@ -954,7 +954,7 @@ FROM Metric SELECT uniques(service.instance.id) WHERE metricName LIKE 'process.r
             ▼
 (2) Are only some charts blank (e.g. GC charts blank but thread pool populated)?
             │
-     YES ───┴──► Verify that the other chart groups are actually populated — customers
+     YES ───┼──► Verify that the other chart groups are actually populated — customers
             │    often report only the chart they noticed. If the customer is on .NET 9+
             │    with OpenTelemetry.Instrumentation.Runtime >= v1.10.0, the entire page
             │    will be blank (metric name change), not just GC. If GC charts are
@@ -965,7 +965,7 @@ FROM Metric SELECT uniques(service.instance.id) WHERE metricName LIKE 'process.r
             ▼
 (3) Is service.instance.id present on the metrics?
             │
-     NO ────┴──► Charts render but show no series. Add service.instance.id to the
+     NO ────┼──► Charts render but show no series. Add service.instance.id to the
             │    resource attributes of the OTel SDK configuration.
             │    Confirm with query (4) below.
         YES │
@@ -997,7 +997,7 @@ FROM Metric SELECT uniques(service.instance.id) WHERE metricName LIKE 'process.r
 ```
 (1) Is any runtime.go.* data arriving?
             │
-     NO ────┴──► Check SDK version.
+     NO ────┼──► Check SDK version.
             │    Current versions of go.opentelemetry.io/contrib/instrumentation/runtime
             │    emit stable go.* names by default — the UI queries runtime.go.* (legacy).
             │    Set OTEL_GO_X_DEPRECATED_RUNTIME_METRICS=true to emit both naming schemes.
@@ -1006,14 +1006,14 @@ FROM Metric SELECT uniques(service.instance.id) WHERE metricName LIKE 'process.r
             ▼
 (2) Are only some charts blank?
             │
-     YES ───┴──► runtime.go.* metrics are arriving but some are absent.
+     YES ───┼──► runtime.go.* metrics are arriving but some are absent.
             │    Confirm which specific metrics are present with query (1a).
             │    Cross-reference with the chart tables in Go Runtime page above.
         NO  │
             ▼
 (3) Is service.instance.id present on the metrics?
             │
-     NO ────┴──► Charts render but show no series. Add service.instance.id to the
+     NO ────┼──► Charts render but show no series. Add service.instance.id to the
             │    resource attributes of the OTel SDK configuration.
             │    Confirm with query (3) below.
         YES │
