@@ -22,6 +22,11 @@ New Relic does not display raw OpenTelemetry data directly in the APM UI. Instea
 - [JVM Runtime page](#jvm-runtime-page)
 - [.NET VMs page](#net-vms-page)
 - [Go Runtime page](#go-runtime-page)
+- [AI Monitoring for OTel services](#ai-monitoring-for-otel-services)
+  - [How it works](#how-it-works-ai-monitoring)
+  - [The `aiEnabledApp` entity gate](#the-aienabledapp-entity-gate)
+  - [Span → `Llm*` event mapping](#span--llm-event-mapping)
+  - [What data is needed](#what-data-is-needed-ai-monitoring)
 - [Troubleshooting](#troubleshooting)
   - [Is any data reaching New Relic?](#is-any-data-reaching-new-relic)
   - [Summary / Transactions page is blank](#summary--transactions-page-is-blank)
@@ -32,6 +37,8 @@ New Relic does not display raw OpenTelemetry data directly in the APM UI. Instea
   - [JVM Runtime page is blank](#jvm-runtime-page-is-blank)
   - [.NET VMs page is blank](#net-vms-page-is-blank)
   - [Go Runtime page is blank](#go-runtime-page-is-blank)
+  - [AI Monitoring UI is missing/blank for an OTel entity](#ai-monitoring-ui-is-missingblank-for-an-otel-entity)
+  - [`Llm*` events are missing content, tool calls, or agent names](#llm-events-are-missing-content-tool-calls-or-agent-names)
 
 ---
 
@@ -559,6 +566,174 @@ If a customer is on a current version of `go.opentelemetry.io/contrib/instrument
 
 ---
 
+## AI Monitoring for OTel services
+
+**Note:** this section is new for a brand new feature — please help verify and confirm the documentation below.
+
+This is a **separate synthesis path** from everything above. It does not create or use any metrics.
+
+There are two basic things at play: a UI that only shows up for an entity once it has the tag `aiEnabledApp:true`, and 5 `Llm*` events that New Relic synthesizes directly from spans carrying `gen_ai.*` attributes.
+
+### How it works
+
+```
+ OTel span with gen_ai.* attributes
+          │
+          ▼
+ Does the span qualify for AI Monitoring?
+   Needs at least one of 9 specific gen_ai.* attributes — not just any gen_ai.*
+   attribute. See the gate table below.
+          │
+          ▼
+ New Relic tags the entity aiEnabledApp:true
+ and synthesizes Llm* events from the span
+          │                                              │
+          ▼                                              ▼
+ AI Monitoring UI                                Llm* events queryable
+ (gated on tags.aiEnabledApp = 'true')            directly via NRQL
+```
+
+### The `aiEnabledApp` entity gate
+
+The AI Monitoring UI shows an entity once it has the tag `tags.aiEnabledApp = 'true'` — same mechanism as any other entity tag.
+
+Getting that tag isn't as simple as "any `gen_ai.*` attribute," though — there are two checks, and they use different attribute sets. This is the most common source of "but my span has `gen_ai.*` attributes" confusion:
+
+| Gate | Condition |
+|---|---|
+| 1. Span qualifies for AI Monitoring at all | Span has **at least one** of these 9 attributes as a non-blank string: `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.system_instructions`, `gen_ai.tool.definitions`, `gen_ai.agent.name`, `gen_ai.tool.name`, `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.system` |
+| 2. Entity gets the `aiEnabledApp:true` tag | Span (already past gate 1) has **any** attribute with a `gen_ai.` prefix |
+| 3. AI Monitoring UI shows the entity | Entity has the `aiEnabledApp:true` tag |
+
+> A span with only, say, `gen_ai.request.model` and `gen_ai.usage.input_tokens` — no message content, no `gen_ai.operation.name`, no `gen_ai.system`/`gen_ai.provider.name` — never passes gate 1. It won't tag the entity and won't produce an `Llm*` event, even though it's clearly a gen-ai span.
+
+**Tag propagation timing:** Engineering suggests it could take up to 30 minutes for the tag to be applied.
+
+**Agent/tool spans:** an agent or tool needs `gen_ai.agent.name`/`gen_ai.tool.name` set on the span where the agent/tool actually executes — `span.kind` must be `server` or `internal`. Set on a `client`/`producer` span instead (the caller side of the call, a common mistake), and no agent/tool entity or `LlmAgent`/`LlmTool` event is created — nothing errors, it just silently doesn't show up.
+
+### Span → `Llm*` event mapping
+
+| `Llm*` event | Created when | What it's for |
+|---|---|---|
+| `LlmChatCompletionMessage` | One per message on a qualifying span (system instruction, input, or output) | Individual chat turns |
+| `LlmChatCompletionSummary` | Alongside the messages above, or alone for a failed span with no content | Per-call summary: model, tokens, duration, errors |
+| `LlmAgent` | Span has `gen_ai.agent.name` on a `server`/`internal` span | One entity per named agent |
+| `LlmTool` | Span has `gen_ai.tool.name` on a `server`/`internal` span | One event per tool invocation |
+| `LlmToolDefinition` | Span has `gen_ai.tool.definitions` | The tools available to the model for that call |
+
+A span produces `LlmChatCompletionMessage`/`Summary` if it has real message content (`gen_ai.system_instructions`/`.input.messages`/`.output.messages`), **or** it looks like a real inference call even without message content — `gen_ai.operation.name` is `chat`, `text_completion`, or `generate_content`, or a provider attribute plus a model/usage-token attribute is present — **or** the span is a failed span (`error = true` or `otel.status_code = ERROR`), so the failure still shows up even with no gen-ai content.
+
+#### `LlmChatCompletionMessage`
+
+One event per message. All messages on a span share one `completion_id` and are numbered in a single `sequence` starting at 0 — system instructions first, then input messages, then output messages, continuing the same count across all three (not restarted per group).
+
+| Attribute | Source | Notes |
+|---|---|---|
+| `id` | Generated | `{completion_id}-{sequence}` |
+| `completion_id` | Generated | Shared with sibling messages and the Summary event |
+| `sequence` | Position in the ordered list above | 0-indexed |
+| `content` | The message text, from `gen_ai.system_instructions`, `gen_ai.input.messages`, or `gen_ai.output.messages` | Truncated to 4096 characters if longer |
+| `role` | `system` (from system instructions), `user` (from input messages), or `assistant` (from output messages); `reasoning` if that specific message is marked as a reasoning step | |
+| `is_response` | `true` only for messages sourced from `gen_ai.output.messages` | **Omitted** (not `false`) for everything else |
+| `token_count` | `0` | Only present at all if the span has usage-token attributes; New Relic does not compute a real per-message token count |
+| `response.choices.finish_reason` | First value in `gen_ai.response.finish_reasons` | |
+| `conversation_id` | `gen_ai.conversation.id` | |
+
+> **No message JSON, but still a real inference call** (e.g. only usage/model attributes were sent — common with some providers): New Relic synthesizes a blank-content (`content = ""`) message instead of skipping the span entirely, so the call still shows up. Role is based on which usage-token attribute is present (input tokens → `user`, output tokens → `assistant`).
+
+#### `LlmChatCompletionSummary`
+
+Emitted alongside the message events for a real call, or alone (zero messages, no request/response fields) for a failed span with no gen-ai content.
+
+| Attribute | Source | Notes |
+|---|---|---|
+| `id` | Same as `completion_id` on the sibling messages | |
+| `response.number_of_messages` | Count of sibling message events | `0` for the error-only case |
+| `duration` | `duration` span attribute | |
+| `vendor` | `gen_ai.provider.name`, falling back to `gen_ai.system` | |
+| `request.model` / `response.model` | `gen_ai.request.model` / `gen_ai.response.model` | |
+| `request_id` | `gen_ai.response.id` | **Maps from the response ID** — there is no separate request-id attribute |
+| `conversation_id` | `gen_ai.conversation.id` | |
+| `request.temperature` | `gen_ai.request.temperature` | |
+| `request.max_tokens` | `gen_ai.request.max_tokens` | |
+| `response.choices.finish_reason` | First value in `gen_ai.response.finish_reasons` | |
+| `response.usage.prompt_tokens` / `.completion_tokens` | `gen_ai.usage.input_tokens` / `.output_tokens` | |
+| `response.usage.total_tokens` | `gen_ai.usage.total_tokens` if present, else `input_tokens + output_tokens` if either is present | |
+| `response.usage.cached_tokens` | `gen_ai.usage.cached_tokens` | |
+| `response.usage.reasoning_tokens` | `gen_ai.usage.reasoning_tokens` | |
+
+#### `LlmAgent`
+
+One entity + event per span with `gen_ai.agent.name` on a `server`/`internal` span.
+
+| Attribute | Source | Notes |
+|---|---|---|
+| `id` | Generated | |
+| `name` | `gen_ai.agent.name` | |
+| `duration` | `duration` span attribute | |
+| `gen_ai.agent.id` | `gen_ai.agent.id` | |
+| `gen_ai.agent.description` | `gen_ai.agent.description` | |
+| `gen_ai.conversation.id` | `gen_ai.conversation.id` | |
+| `gen_ai.provider.name` | `gen_ai.provider.name`, falling back to `gen_ai.system` | |
+| `gen_ai.request.model` | `gen_ai.request.model` | |
+| `gen_ai.system` | `gen_ai.system` | |
+
+#### `LlmTool`
+
+One event per span with `gen_ai.tool.name` on a `server`/`internal` span (for MCP tool spans specifically, `span.kind` must be `server` and `mcp.method.name` must also be present).
+
+| Attribute | Source | Notes |
+|---|---|---|
+| `id` | Generated | |
+| `name` | `gen_ai.tool.name` | |
+| `duration` | `duration` span attribute | |
+| `input` | `gen_ai.tool.call.arguments` | |
+| `output` | `gen_ai.tool.call.result` | |
+| `agent_name` | `gen_ai.agent.name` | The owning agent's name, if the span also carries it |
+| `description` | `gen_ai.tool.description` | |
+
+#### `LlmToolDefinition`
+
+Fires whenever `gen_ai.tool.definitions` is a non-blank JSON array, regardless of what else is on the span.
+
+| Attribute | Source | Notes |
+|---|---|---|
+| `id` | Generated | |
+| `tool_count` | Length of the `gen_ai.tool.definitions` array | |
+| `tool_names` | `name` (or `function.name`) of each tool definition, comma-joined | Capped at 50 tool names and 4096 characters total |
+| `tool_definitions` | `gen_ai.tool.definitions`, passed through as raw JSON | |
+| `vendor` | `gen_ai.provider.name`, falling back to `gen_ai.system` | |
+
+> Message content and tool input/output over the 4096-character NRDB string cap are truncated in the event; where possible, the full value is preserved separately rather than lost outright.
+
+### What data is needed (AI Monitoring)
+
+**Minimum to light up the AI Monitoring UI for an OTel entity at all:**
+Emit at least one of the 9 qualifying attributes on a span: `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.system_instructions`, `gen_ai.tool.definitions`, `gen_ai.agent.name`, `gen_ai.tool.name`, `gen_ai.operation.name`, `gen_ai.provider.name`, or `gen_ai.system`. Any one is sufficient — this is an OR, not an AND.
+
+**Chat messages and summary (`LlmChatCompletionMessage`/`Summary`):**
+Either emit `gen_ai.input.messages`/`gen_ai.output.messages`/`gen_ai.system_instructions` JSON directly, or make the span identifiable as an inference call — `gen_ai.operation.name` set to `chat`, `text_completion`, or `generate_content`, or a provider attribute (`gen_ai.provider.name`/`gen_ai.system`) plus a model or usage-token attribute.
+
+**Agent entity + `LlmAgent` event:**
+Set `gen_ai.agent.name` on a span with `span.kind = internal` or `server` (not `client`/`producer`).
+
+**Tool entity + `LlmTool` event:**
+Set `gen_ai.tool.name` on a span with `span.kind = internal` or `server`. For MCP tools specifically, `span.kind` must be `server` and `mcp.method.name` must also be present.
+
+**`LlmToolDefinition`:**
+Emit `gen_ai.tool.definitions` as a JSON array of tool/function definitions on any qualifying span.
+
+**Recommended client-side settings** — general OTel best practice for this ingest pipeline. The pipeline truncates or drops values that are too long on ingest regardless (see the 4096-char cap above); setting these client-side avoids relying on that and losing content before it's even sent:
+
+```shell
+export OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT=4095
+export OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT=4095
+```
+
+**Not required:** no `apm.*` or other metric is generated or depended on by this feature — it is span/event-only. There is no OTel semantic-convention version gate; any span carrying the qualifying attributes above is accepted regardless of the emitting library's declared semconv version. `gen_ai.*` semconv **1.43+** is a recommended baseline for customers so their instrumentation actually emits these attributes in the first place — it is not something enforced on ingest.
+
+---
+
 ## Troubleshooting
 
 ### Is any data reaching New Relic?
@@ -586,7 +761,7 @@ If a customer is on a current version of `go.opentelemetry.io/contrib/instrument
 FROM Metric, Span SELECT count(*) WHERE service.name = 'SERVICE_NAME' SINCE 1 day ago
 
 -- (2) Check which apm.service.* metrics have been synthesized
-FROM Metric SELECT uniques(metricName) WHERE metricName LIKE 'apm.service.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+FROM Metric SELECT count(metricName) WHERE metricName LIKE 'apm.service.%' AND service.name = 'SERVICE_NAME' FACET metricName SINCE 1 day ago
 ```
 
 ### Summary / Transactions page is blank
@@ -1032,4 +1207,122 @@ FROM Metric SELECT uniques(metricName) WHERE metricName LIKE 'go.%' AND service.
 
 -- (3) Confirm service.instance.id is present (required facet for all Go Runtime OTel charts)
 FROM Metric SELECT uniques(service.instance.id) WHERE metricName LIKE 'runtime.go.%' AND service.name = 'SERVICE_NAME' SINCE 1 day ago
+```
+
+### AI Monitoring UI is missing/blank for an OTel entity
+
+```
+(1) Does the span have at least one of the 9 qualifying gen_ai.* attributes?
+  gen_ai.input.messages, gen_ai.output.messages, gen_ai.system_instructions,
+  gen_ai.tool.definitions, gen_ai.agent.name, gen_ai.tool.name,
+  gen_ai.operation.name, gen_ai.provider.name, gen_ai.system
+            │
+     NO ────┼──► HERE'S THE PROBLEM: the span doesn't qualify for AI Monitoring at all.
+            │    No tag, no Llm* events. Check the instrumentation version — pre-1.43 gen_ai
+            │    semconv libraries and legacy llm.* attributes (older LangChain packages)
+            │    don't match any of the 9 attributes above.
+        YES │
+            ▼
+(2) Does the entity have the aiEnabledApp tag?
+            │
+     NO ────┼──► HERE'S THE PROBLEM (probably): allow up to 30 minutes for the tag to land.
+            │    Still missing after that? Confirm the span resolved an entity.guid — tags
+            │    aren't written for spans without one.
+        YES │
+            ▼
+(3) Specifically missing the agent/tool entity (chat messages work fine otherwise)?
+            │
+    YES ────┼──► HERE'S THE PROBLEM: gen_ai.agent.name / gen_ai.tool.name is almost certainly
+            │    set on a client/producer span (the caller side of the call) instead of the
+            │    server/internal span where the agent/tool actually executes. Only
+            │    server/internal spans produce an LlmAgent/LlmTool event.
+        NO  │
+            ▼
+  UI should show the entity under AI Monitoring. ✓
+```
+
+**Verification queries:**
+
+```sql
+-- (1) Check for any of the 9 qualifying attributes
+FROM Span SELECT count(*) WHERE service.name = 'SERVICE_NAME' AND (
+  gen_ai.input.messages IS NOT NULL OR gen_ai.output.messages IS NOT NULL OR
+  gen_ai.system_instructions IS NOT NULL OR gen_ai.tool.definitions IS NOT NULL OR
+  gen_ai.agent.name IS NOT NULL OR gen_ai.tool.name IS NOT NULL OR
+  gen_ai.operation.name IS NOT NULL OR gen_ai.provider.name IS NOT NULL OR gen_ai.system IS NOT NULL
+) SINCE 1 day ago
+
+-- (2) Check whether the entity has been tagged (confirm entity.guid resolved on the span first)
+FROM Span SELECT latest(entity.guid) WHERE service.name = 'SERVICE_NAME' AND gen_ai.system IS NOT NULL SINCE 1 day ago
+-- then check the entity's tags (e.g. via entitySearch in NerdGraph) for aiEnabledApp = 'true'
+
+-- (3) Check span.kind on spans carrying agent/tool attributes
+FROM Span SELECT count(*) WHERE service.name = 'SERVICE_NAME' AND (gen_ai.agent.name IS NOT NULL OR gen_ai.tool.name IS NOT NULL) FACET span.kind SINCE 1 day ago
+-- span.kind = 'client' or 'producer' here means no LlmAgent/LlmTool event will be created
+```
+
+### `Llm*` events are missing content, tool calls, or agent names
+
+```
+(1) Is there anything at all — no message, summary, agent, or tool event for a
+    span with gen_ai.* attributes?
+            │
+    YES ────┼──► HERE'S THE PROBLEM: the span has gen_ai.* attributes, but none of them are
+            │    message content, and it doesn't look like a real call either (no
+            │    gen_ai.operation.name, and no gen_ai.system/gen_ai.provider.name paired with
+            │    a model or usage-token attribute). Add gen_ai.system or gen_ai.operation.name
+            │    to the span.
+        NO  │
+            ▼
+(2) Does LlmChatCompletionSummary exist with response.number_of_messages = 0
+    and no model/usage fields?
+            │
+    YES ────┼──► Not a bug — this is the expected shape for a failed span that carried no
+            │    gen-ai content (error = true or otel.status_code = ERROR). The failure is
+            │    surfaced with no message content because there wasn't any to begin with.
+        NO  │
+            ▼
+(3) Do the chat messages exist but content is blank ("")?
+            │
+    YES ────┼──► Expected: the span looked like a real call (operation/provider + model or
+            │    usage tokens) but had no gen_ai.input.messages / .output.messages /
+            │    .system_instructions JSON. Add that JSON to the span to get real content
+            │    instead of blanks.
+        NO  │
+            ▼
+(4) Is request_id missing on LlmChatCompletionSummary?
+            │
+    YES ────┼──► Expected if the span never set gen_ai.response.id — that's the only source
+            │    for request_id. completion_id is still present either way.
+        NO  │
+            ▼
+(5) Is message content or tool input/output cut off?
+            │
+    YES ────┼──► Content over 4096 characters is truncated. Recommend the customer set
+            │    OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT=4095 client-side so truncation happens
+            │    predictably instead of relying on the ingest-side cap.
+        NO  │
+            ▼
+  Nothing obviously wrong in the mapping — re-check the raw span attributes against the
+  Span → Llm* event mapping above for the specific event/attribute in question. ✓
+```
+
+**Verification queries:**
+
+```sql
+-- (1) Check whether spans have an operation/provider classification at all
+FROM Span SELECT count(*) WHERE service.name = 'SERVICE_NAME' AND gen_ai.request.model IS NOT NULL AND gen_ai.operation.name IS NULL AND gen_ai.system IS NULL AND gen_ai.provider.name IS NULL SINCE 1 day ago
+-- non-zero here = spans that will produce no Llm* event at all
+
+-- (2) Check for error-only summaries (zero messages, no model/usage fields)
+FROM LlmChatCompletionSummary SELECT count(*) WHERE appName = 'SERVICE_NAME' AND response.number_of_messages = 0 SINCE 1 day ago
+
+-- (3) Check for content-less synthesized messages
+FROM LlmChatCompletionMessage SELECT count(*) WHERE appName = 'SERVICE_NAME' AND content = '' SINCE 1 day ago
+
+-- (4) Check gen_ai.response.id presence on spans (drives request_id)
+FROM Span SELECT count(*) WHERE service.name = 'SERVICE_NAME' AND gen_ai.response.id IS NOT NULL SINCE 1 day ago
+
+-- (5) Check raw content length on spans before truncation
+FROM Span SELECT gen_ai.input.messages, gen_ai.output.messages FROM Span WHERE service.name = 'SERVICE_NAME' SINCE 30 minutes ago LIMIT 5
 ```
